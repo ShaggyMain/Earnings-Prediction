@@ -7,7 +7,7 @@
 
 | Temat | Decyzja | Konsekwencja |
 |---|---|---|
-| Klucze API | Finnhub — **jest** (zweryfikowany, zwraca `hour: bmo/amc`). Tradier, Polygon — **brak** | Weryfikacja timingu z 3 źródeł: Nasdaq + Finnhub + yfinance. Łańcuch opcji **tylko z yfinance** — brak fallbacku, więc jakość bid/ask jest wąskim gardłem fazy 1 |
+| Klucze API | Finnhub — **jest** (zweryfikowany, zwraca `hour: bmo/amc`) | Kalendarz i timing: Nasdaq + Finnhub, zgodność 98% |
 | Zakres sesji 1 | Kroki 0–2, potem STOP i akceptacja | Bez warstwy źródeł, bez silnika EM, bez bazy |
 | Pierwszy skan | Na żywo, `--date 2026-08-13`, ok. 15:30 ET | Grupa AMC 13.08 + BMO 14.08, `baseline_close` = close(13.08), rozliczenie na sesji 14.08 |
 | Backfill | 2 lata wstecz, tylko tickery przechodzące filtry płynności | Rząd 1000–1500 spółek, ~15–20k zdarzeń |
@@ -32,7 +32,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
 | 9 | **STOP** — akceptacja przed fazą 2 | ⬜ | — |
 
-## Blocker po kroku 1
+## Blocker po kroku 1 — rozstrzygnięty, czeka na klucz
 
 Diagnostyka wykazała, że **w tym środowisku nie ma dostępu ani do łańcucha opcji, ani do historii
 cen OHLC** — pełne uzasadnienie w `docs/PROBE-2026-08-13.md` §2–3.
@@ -41,10 +41,35 @@ cen OHLC** — pełne uzasadnienie w `docs/PROBE-2026-08-13.md` §2–3.
 - yfinance jest niesprawny za proxy (impersonacja TLS w `curl_cffi`), Yahoo bezpośrednio zwraca 429,
   stooq ma anty-bota, a `candle` i `option-chain` Finnhuba są poza darmowym planem
 
-Kroki 3 i częściowo 4 dają się zrobić mimo to (kalendarz, modele, baza, czysta matematyka EM na
-fixtures). Kroki 5, 6 i 8 są **zablokowane** do czasu decyzji o źródle.
+**Decyzja (2026-08-13): łańcuch opcji i historia OHLC pochodzą z Tradier sandbox.**
 
-Rozstrzygnięcie należy do właściciela — kandydaci opisani w `docs/PROBE-2026-08-13.md` §3.
+Uzasadnienie: jako jedyny z osiągalnych dostawców pokrywa oba braki jednym darmowym kluczem
+(`/v1/markets/options/chains` + `/v1/markets/history`) i działa przez proxy, więc `scan`, `settle`
+i `backfill` mogą lecieć także z GitHub Actions, bez ręcznego uruchamiania.
+
+**Czego brakuje do wznowienia pracy:** klucz z https://developer.tradier.com w `.env` jako
+`EMSCAN_TRADIER_API_KEY` (i w GitHub Secrets przed krokiem 7). Właściciel zakłada konto.
+
+Do czasu dostarczenia klucza kroki 5, 6 i 8 pozostają zablokowane. Kroki 3–4 są od niego niezależne
+— dostawca opcji wchodzi za gotowy interfejs `OptionsChainSource`.
+
+## Start następnej sesji
+
+Kolejność bez zmian: **krok 3** (warstwa źródeł kalendarza + `models.py` + `db.py` + fixtures +
+testy bez sieci), potem **krok 4** (silnik EM).
+
+Przed pisaniem kodu w kroku 3 warto:
+
+1. dopisać `TradierOptionsSource` i `TradierPriceSource` do listy implementacji za interfejsami
+   `OptionsChainSource` / `PriceSource` — kolejność fallbacku: **Tradier → yfinance (lokalnie)**
+2. sprawdzić kluczem sandbox realny kształt odpowiedzi Tradiera, zanim powstanie parser —
+   tak jak zrobiliśmy z Nasdaq w kroku 1. Nie zgadywać pól
+3. przyciąć `data/raw/2026-08-13/nasdaq_earnings_*.json` i `finnhub_earnings_*.json` do kilkunastu
+   spółek i zapisać jako fixtures — muszą objąć AMC, BMO, UNKNOWN oraz przypadek konfliktu
+   (FTLF, REKR), bo to on testuje logikę `timing_confidence`
+
+Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
+`docs/PROBE-2026-08-13.md`. Nie każ czytać całego repo.
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji
 

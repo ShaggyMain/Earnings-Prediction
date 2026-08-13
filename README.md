@@ -102,8 +102,13 @@ kierunku i mimo to stracić. Każdy backtest w tym repo liczy wejście po ask i 
 | Warstwa | Kolejność |
 |---|---|
 | Kalendarz wyników | Nasdaq → Finnhub → yfinance (weryfikacja krzyżowa) |
-| Łańcuch opcji | yfinance → Tradier sandbox → Polygon.io (opcjonalnie) |
-| Ceny OHLC | yfinance → stooq |
+| Łańcuch opcji | Tradier sandbox → yfinance (tylko lokalnie) → Polygon.io (opcjonalnie) |
+| Ceny OHLC | Tradier sandbox → yfinance (tylko lokalnie) |
+
+Kolejność łańcucha opcji i cen wynika z diagnostyki z 13.08.2026: yfinance nie działa za proxy
+(`curl_cffi` podszywa się pod TLS-fingerprint przeglądarki, czego re-terminacja TLS nie przepuszcza),
+Yahoo odpowiada wtedy 429, a stooq stawia challenge anty-botowy. Pełny wynik i dane liczbowe:
+[`docs/PROBE-2026-08-13.md`](docs/PROBE-2026-08-13.md).
 
 MarketChameleon bywa użyteczny jako punkt odniesienia do **ręcznej** weryfikacji. Repo nie zawiera
 i nie będzie zawierać scrapera tego serwisu — dane EM są tam za logowaniem, a automatyczne
