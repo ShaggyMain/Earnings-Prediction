@@ -24,7 +24,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 1 | `scripts/probe_sources.py` + diagnostyka | ✅ zrobione | Wynik: `docs/PROBE-2026-08-13.md` |
 | 2 | `pyproject.toml`, CI (lint + testy), README | ✅ zrobione | `ruff`, `mypy --strict`, `pytest` zielone lokalnie |
 | — | **STOP — decyzja o źródle opcji i cen** | 🔴 **blocker** | Patrz sekcja „Blocker" niżej |
-| 3 | Warstwa źródeł + `models.py` + `db.py` | ⬜ | Fixtures nagrane, testy bez sieci przechodzą |
+| 3 | Warstwa źródeł + `models.py` + `db.py` | ✅ zrobione | 103 testy bez sieci, ruff + mypy --strict zielone |
 | 4 | Silnik EM (`engine/expected_move.py`) | ⬜ | Testy 3 metod (A/B/C) + mapowanie BMO/AMC → `session_date` |
 | 5 | `scan` + raport | ⬜ | Prawdziwy skan w oknie sesji, raport md |
 | 6 | `settle` + `outcomes` | ⬜ | Rozliczenie kolejnej sesji, testy AMC/BMO/święto |
@@ -53,23 +53,54 @@ i `backfill` mogą lecieć także z GitHub Actions, bez ręcznego uruchamiania.
 Do czasu dostarczenia klucza kroki 5, 6 i 8 pozostają zablokowane. Kroki 3–4 są od niego niezależne
 — dostawca opcji wchodzi za gotowy interfejs `OptionsChainSource`.
 
+## Decyzje podjęte w kroku 3 (2026-08-13, sesja 2)
+
+| Temat | Decyzja | Gdzie w kodzie |
+|---|---|---|
+| `DMH` | Osobna wartość enuma. Rekord trafia do bazy z pełną informacją, ale `session_date` jest `NULL` i EM się nie liczy — przy publikacji w trakcie sesji ani sesja rozliczeniowa, ani `baseline_close` nie są jednoznaczne | `models.Timing`, `engine.events.session_date_for` |
+| `timing_confidence` | Enum HIGH / MEDIUM / LOW / UNKNOWN. HIGH = dwa źródła zgodne, MEDIUM = jedno źródło zna porę, LOW = konflikt (timing wynikowy UNKNOWN), UNKNOWN = nikt nie wie | `models.TimingConfidence`, `engine.events.resolve_timing` |
+| `eps_actual_present` | Zapisywane jako informacja i logowane przy konflikcie, ale **nie** rozstrzyga, które źródło ma rację | `models.RawEarningsRecord`, `engine.events.merge_records` |
+
+## Kwestia otwarta: źródła niezgodne co do **daty** publikacji
+
+Osobny problem od konfliktu pory. 13.08 pięć spółek — ACTU, AIRE, FSI, SOWG, VNRX —
+Nasdaq umieścił 13.08, a Finnhub 14.08. Po scaleniu po `(ticker, event_date)` powstają
+z tego **dwa zdarzenia opisujące jedną publikację**.
+
+Sprawdziłem, czy da się to rozstrzygnąć przez `session_date` — nie da się. Cztery z tych
+pięciu mają `UNKNOWN` w obu źródłach, więc sesji dla nich i tak nie wyliczymy.
+
+Skala: 5 przypadków na ok. 405 spółek, czyli ~1,2%. Wszystkie i tak są niescanowalne,
+więc **faza 1 na tym nie cierpi**. Problem realnie dotyczy dopiero **fazy 2**, gdzie
+duplikat zawyży statystyki historyczne spółki.
+
+Stan obecny: `engine.events.find_adjacent_date_conflicts()` takie pary **wykrywa i raportuje**,
+ale niczego nie scala. Polityka scalania do ustalenia przed krokiem 8 (backfill).
+
 ## Start następnej sesji
 
-Kolejność bez zmian: **krok 3** (warstwa źródeł kalendarza + `models.py` + `db.py` + fixtures +
-testy bez sieci), potem **krok 4** (silnik EM).
+Następny jest **krok 4** — silnik EM. Wymaga klucza Tradiera, więc kolejność jest taka:
 
-Przed pisaniem kodu w kroku 3 warto:
-
-1. dopisać `TradierOptionsSource` i `TradierPriceSource` do listy implementacji za interfejsami
-   `OptionsChainSource` / `PriceSource` — kolejność fallbacku: **Tradier → yfinance (lokalnie)**
-2. sprawdzić kluczem sandbox realny kształt odpowiedzi Tradiera, zanim powstanie parser —
-   tak jak zrobiliśmy z Nasdaq w kroku 1. Nie zgadywać pól
-3. przyciąć `data/raw/2026-08-13/nasdaq_earnings_*.json` i `finnhub_earnings_*.json` do kilkunastu
-   spółek i zapisać jako fixtures — muszą objąć AMC, BMO, UNKNOWN oraz przypadek konfliktu
-   (FTLF, REKR), bo to on testuje logikę `timing_confidence`
+1. **Klucz do `.env`** jako `EMSCAN_TRADIER_API_KEY` (rejestracja na developer.tradier.com)
+2. **Sprawdzić kształt odpowiedzi Tradiera** przed pisaniem parsera — dopisać sekcję do
+   `scripts/probe_sources.py` i zobaczyć realny JSON. To się opłaciło przy Nasdaqu: pole
+   `time` miało `time-not-supplied` w 54% rekordów, czego z dokumentacji nie dało się przewidzieć
+3. `TradierOptionsSource` i `TradierPriceSource` za gotowymi interfejsami `OptionsChainSource`
+   i `PriceSource` z `sources/base.py`
+4. `engine/expected_move.py` — trzy warianty EM, testy na fixtures łańcucha opcji
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
 `docs/PROBE-2026-08-13.md`. Nie każ czytać całego repo.
+
+### Co już stoi i czego nie trzeba pisać od nowa
+
+- `trading_calendar.py` — sesje NYSE regułami, działa dla dowolnego roku (backfill też)
+- `sources/base.py` — interfejsy `EarningsCalendarSource`, `OptionsChainSource`, `PriceSource`
+  oraz typy `OptionQuote`, `OptionChain`, `DailyBar`; `OptionQuote.mid` zwraca `None` przy
+  zerowym bid/ask, bo zejście na `lastPrice` to decyzja silnika EM — to on podnosi flagę `zero_bid`
+- `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi
+- `db.py` — schemat trzech tabel gotowy, w tym `em_snapshots` na trzy warianty EM
+- `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji
 

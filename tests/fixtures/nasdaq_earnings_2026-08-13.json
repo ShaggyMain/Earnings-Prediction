@@ -1,0 +1,111 @@
+{
+  "data": {
+    "asOf": "Thu, Aug 13, 2026",
+    "headers": {},
+    "rows": [
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "$2.48",
+        "time": "time-after-hours",
+        "symbol": "AMAT",
+        "name": "Applied Materials, Inc.",
+        "marketCap": "$435,208,861,555",
+        "fiscalQuarterEnding": "Jul/2026",
+        "epsForecast": "$3.38",
+        "noOfEsts": "9"
+      },
+      {
+        "lastYearRptDt": "8/07/2025",
+        "lastYearEPS": "$0.59",
+        "time": "time-pre-market",
+        "symbol": "BN",
+        "name": "Brookfield Corporation",
+        "marketCap": "$109,824,404,615",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "$0.63",
+        "noOfEsts": "2"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "$0.14",
+        "time": "time-not-supplied",
+        "symbol": "NU",
+        "name": "Nu Holdings Ltd.",
+        "marketCap": "$65,842,934,450",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "$0.20",
+        "noOfEsts": "4"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "($0.58)",
+        "time": "time-pre-market",
+        "symbol": "ABEO",
+        "name": "Abeona Therapeutics Inc.",
+        "marketCap": "$425,183,774",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "($0.23)",
+        "noOfEsts": "4"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "($0.65)",
+        "time": "time-after-hours",
+        "symbol": "ACOG",
+        "name": "Alpha Cognition Inc.",
+        "marketCap": "$194,878,231",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "($0.39)",
+        "noOfEsts": "3"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "$0.18",
+        "time": "time-after-hours",
+        "symbol": "FTLF",
+        "name": "FitLife Brands, Inc.",
+        "marketCap": "$96,352,399",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "$0.18",
+        "noOfEsts": "1"
+      },
+      {
+        "lastYearRptDt": "8/12/2025",
+        "lastYearEPS": "($0.07)",
+        "time": "time-after-hours",
+        "symbol": "REKR",
+        "name": "Rekor Systems, Inc.",
+        "marketCap": "$93,986,343",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "($0.03)",
+        "noOfEsts": "1"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "($0.30)",
+        "time": "time-not-supplied",
+        "symbol": "ACTU",
+        "name": "Actuate Therapeutics, Inc.",
+        "marketCap": "$23,205,684",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "($0.20)",
+        "noOfEsts": "2"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "($1.20)",
+        "time": "time-after-hours",
+        "symbol": "VNRX",
+        "name": "VolitionRX Limited",
+        "marketCap": "$8,052,845",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "($0.70)",
+        "noOfEsts": "2"
+      }
+    ]
+  },
+  "message": null,
+  "status": {
+    "rCode": 200
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "data": {
+    "asOf": "Fri, Aug 14, 2026",
+    "headers": {},
+    "rows": [
+      {
+        "lastYearRptDt": "N/A",
+        "lastYearEPS": "N/A",
+        "time": "time-pre-market",
+        "symbol": "AYA",
+        "name": "Aya Gold & Silver Inc.",
+        "marketCap": "$4,025,475,080",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "$0.36",
+        "noOfEsts": "N/A"
+      },
+      {
+        "lastYearRptDt": "8/14/2025",
+        "lastYearEPS": "($0.36)",
+        "time": "time-after-hours",
+        "symbol": "CSAN",
+        "name": "Cosan S.A.",
+        "marketCap": "$2,538,605,396",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "",
+        "noOfEsts": "N/A"
+      },
+      {
+        "lastYearRptDt": "N/A",
+        "lastYearEPS": "$0.01",
+        "time": "time-not-supplied",
+        "symbol": "BXBL",
+        "name": "BOXABL, Inc. ",
+        "marketCap": "$1,074,645,376",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "",
+        "noOfEsts": "N/A"
+      },
+      {
+        "lastYearRptDt": "N/A",
+        "lastYearEPS": "($0.03)",
+        "time": "time-pre-market",
+        "symbol": "CSPI",
+        "name": "CSP Inc.",
+        "marketCap": "$83,294,175",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "",
+        "noOfEsts": "1"
+      }
+    ]
+  },
+  "message": null,
+  "status": {
+    "rCode": 200
+  }
+}

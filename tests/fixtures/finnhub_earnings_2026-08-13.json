@@ -1,0 +1,92 @@
+{
+  "earningsCalendar": [
+    {
+      "symbol": "ABEO",
+      "date": "2026-08-13",
+      "hour": "bmo",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": -0.2346,
+      "epsActual": -0.35,
+      "revenueEstimate": 12483922,
+      "revenueActual": 11380000
+    },
+    {
+      "symbol": "ACOG",
+      "date": "2026-08-13",
+      "hour": "amc",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": -0.3998,
+      "epsActual": null,
+      "revenueEstimate": 4471884,
+      "revenueActual": null
+    },
+    {
+      "symbol": "ALH",
+      "date": "2026-08-13",
+      "hour": "bmo",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": 0.3456,
+      "epsActual": 0.41,
+      "revenueEstimate": 483405482,
+      "revenueActual": 476760000
+    },
+    {
+      "symbol": "AMAT",
+      "date": "2026-08-13",
+      "hour": "amc",
+      "quarter": 3,
+      "year": 2026,
+      "epsEstimate": 3.4544,
+      "epsActual": null,
+      "revenueEstimate": 9175728984,
+      "revenueActual": null
+    },
+    {
+      "symbol": "BN",
+      "date": "2026-08-13",
+      "hour": "bmo",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": 0.6695,
+      "epsActual": 0.66,
+      "revenueEstimate": 1716992490,
+      "revenueActual": 19406000000
+    },
+    {
+      "symbol": "FTLF",
+      "date": "2026-08-13",
+      "hour": "bmo",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": 0.1989,
+      "epsActual": 0.2,
+      "revenueEstimate": 26522040,
+      "revenueActual": 26550000
+    },
+    {
+      "symbol": "NU",
+      "date": "2026-08-13",
+      "hour": "",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": 0.2087,
+      "epsActual": null,
+      "revenueEstimate": 5383451384,
+      "revenueActual": null
+    },
+    {
+      "symbol": "REKR",
+      "date": "2026-08-13",
+      "hour": "bmo",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": -0.0306,
+      "epsActual": 0,
+      "revenueEstimate": 12864240,
+      "revenueActual": 12660000
+    }
+  ]
+}

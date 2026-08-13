@@ -1,0 +1,37 @@
+{
+  "earningsCalendar": [
+    {
+      "symbol": "ACTU",
+      "date": "2026-08-14",
+      "hour": "",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": -0.1904,
+      "epsActual": null,
+      "revenueEstimate": 0,
+      "revenueActual": null
+    },
+    {
+      "symbol": "CSPI",
+      "date": "2026-08-14",
+      "hour": "",
+      "quarter": 3,
+      "year": 2026,
+      "epsEstimate": null,
+      "epsActual": null,
+      "revenueEstimate": null,
+      "revenueActual": null
+    },
+    {
+      "symbol": "VNRX",
+      "date": "2026-08-14",
+      "hour": "",
+      "quarter": 2,
+      "year": 2026,
+      "epsEstimate": -0.5855,
+      "epsActual": null,
+      "revenueEstimate": 492323,
+      "revenueActual": null
+    }
+  ]
+}
