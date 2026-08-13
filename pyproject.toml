@@ -1,0 +1,97 @@
+[project]
+name = "emscan"
+version = "0.1.0"
+description = "Earnings Expected Move Scanner — narzędzie badawcze do zbierania i oceny oczekiwanego ruchu przed wynikami"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "httpx>=0.27",
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "yfinance>=0.2.40",
+    "pandas>=2.2",
+    "structlog>=24.1",
+    "tenacity>=8.3",
+]
+
+[project.optional-dependencies]
+# FAZA 2-3 — instalowane dopiero, gdy faza 1 zbiera dane stabilnie
+ml = [
+    "lightgbm>=4.3",
+    "scikit-learn>=1.5",
+    "numpy>=1.26",
+    "scipy>=1.13",
+]
+# FAZA 4 — warstwa LLM, patrz docs/SPEC.md §BUDŻET KREDYTÓW
+llm = [
+    "anthropic>=0.34",
+]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "respx>=0.21",
+]
+
+[project.scripts]
+emscan = "emscan.__main__:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/emscan"]
+
+# ------------------------------------------------------------------ ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "SIM",      # simplify
+    "RUF",      # ruff-specific
+    "ANN",      # annotacje — wspiera mypy --strict
+    "T20",      # zakaz print() w src/ (logowanie strukturalne)
+    "DTZ",      # daty bez strefy — patrz SPEC §1.7
+]
+ignore = [
+    "ANN401",   # Any w **kwargs bywa nieuniknione
+]
+
+[tool.ruff.lint.per-file-ignores]
+# skrypt diagnostyczny i testy mają prawo do print() i luźniejszych annotacji
+"scripts/*" = ["T20", "ANN"]
+"tests/*" = ["ANN"]
+
+# ------------------------------------------------------------------ mypy
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+warn_unreachable = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# biblioteki bez stubów — patrz docs/PLAN-faza-1.md
+module = ["yfinance.*", "lightgbm.*", "scipy.*", "sklearn.*"]
+ignore_missing_imports = true
+
+# ------------------------------------------------------------------ pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "network: test wymagający sieci — NIE uruchamiany na CI (SPEC §B.3 pkt 6)",
+]
