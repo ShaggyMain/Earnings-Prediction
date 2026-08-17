@@ -31,6 +31,15 @@ class SourceDataError(SourceError):
     """Źródło odpowiedziało, ale treść jest niezdatna do użycia lub zmienił się kontrakt."""
 
 
+class SymbolNotCovered(SourceError):
+    """Źródło nie prowadzi danych dla tego tickera — to informacja, nie awaria.
+
+    Typowy przypadek: spółka bez notowanych opcji. CBOE zwraca wtedy HTTP 403,
+    co wygląda jak błąd uprawnień, a oznacza po prostu brak instrumentu.
+    Zdarzenie zostaje w bazie z flagą, ale nie wchodzi do skanu.
+    """
+
+
 class OptionType(StrEnum):
     CALL = "call"
     PUT = "put"

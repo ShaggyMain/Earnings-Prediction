@@ -26,13 +26,11 @@ class Settings(BaseSettings):
     )
 
     # --- klucze źródeł ---
+    # Łańcuch opcji (CBOE) i historia OHLC (Nasdaq) nie wymagają żadnego klucza —
+    # patrz docs/PROBE-2026-08-17.md. Klucza potrzebuje wyłącznie kalendarz Finnhuba.
     finnhub_api_key: str | None = None
-    tradier_api_key: str | None = None
-    """Główne źródło łańcucha opcji i historii OHLC — patrz docs/PROBE-2026-08-13.md."""
     polygon_api_key: str | None = None
-
-    tradier_sandbox: bool = True
-    """Sandbox czy produkcja Tradiera. Sandbox ma darmowy klucz i opóźnione dane."""
+    """Płatne, w pełni opcjonalne. Puste = źródło wyłączone."""
 
     # --- ścieżki ---
     db_path: Path = Path("data/emscan.db")

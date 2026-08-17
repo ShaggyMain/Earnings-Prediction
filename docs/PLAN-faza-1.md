@@ -23,8 +23,9 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 0 | Pytania do właściciela | ✅ zrobione | Odpowiedzi zapisane w tabeli decyzji wyżej |
 | 1 | `scripts/probe_sources.py` + diagnostyka | ✅ zrobione | Wynik: `docs/PROBE-2026-08-13.md` |
 | 2 | `pyproject.toml`, CI (lint + testy), README | ✅ zrobione | `ruff`, `mypy --strict`, `pytest` zielone lokalnie |
-| — | **STOP — decyzja o źródle opcji i cen** | 🔴 **blocker** | Patrz sekcja „Blocker" niżej |
+| — | ~~STOP — decyzja o źródle opcji i cen~~ | ✅ rozstrzygnięte | CBOE + Nasdaq, bez klucza |
 | 3 | Warstwa źródeł + `models.py` + `db.py` | ✅ zrobione | 103 testy bez sieci, ruff + mypy --strict zielone |
+| 3b | Źródła opcji (CBOE) i cen (Nasdaq) | ✅ zrobione | 135 testów, CI zielone |
 | 4 | Silnik EM (`engine/expected_move.py`) | ⬜ | Testy 3 metod (A/B/C) + mapowanie BMO/AMC → `session_date` |
 | 5 | `scan` + raport | ⬜ | Prawdziwy skan w oknie sesji, raport md |
 | 6 | `settle` + `outcomes` | ⬜ | Rozliczenie kolejnej sesji, testy AMC/BMO/święto |
@@ -32,7 +33,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
 | 9 | **STOP** — akceptacja przed fazą 2 | ⬜ | — |
 
-## Blocker po kroku 1 — rozstrzygnięty, czeka na klucz
+## Blocker po kroku 1 — zdjęty
 
 Diagnostyka wykazała, że **w tym środowisku nie ma dostępu ani do łańcucha opcji, ani do historii
 cen OHLC** — pełne uzasadnienie w `docs/PROBE-2026-08-13.md` §2–3.
@@ -41,17 +42,19 @@ cen OHLC** — pełne uzasadnienie w `docs/PROBE-2026-08-13.md` §2–3.
 - yfinance jest niesprawny za proxy (impersonacja TLS w `curl_cffi`), Yahoo bezpośrednio zwraca 429,
   stooq ma anty-bota, a `candle` i `option-chain` Finnhuba są poza darmowym planem
 
-**Decyzja (2026-08-13): łańcuch opcji i historia OHLC pochodzą z Tradier sandbox.**
+**Decyzja (2026-08-17): łańcuch opcji i cena spot z CBOE, historia OHLC z Nasdaqa.**
 
-Uzasadnienie: jako jedyny z osiągalnych dostawców pokrywa oba braki jednym darmowym kluczem
-(`/v1/markets/options/chains` + `/v1/markets/history`) i działa przez proxy, więc `scan`, `settle`
-i `backfill` mogą lecieć także z GitHub Actions, bez ręcznego uruchamiania.
+Tradier został odrzucony przez właściciela. W zamian znalezione i zweryfikowane źródła **bez klucza
+i bez rejestracji** — pełny wynik badania w `docs/PROBE-2026-08-17.md`:
 
-**Czego brakuje do wznowienia pracy:** klucz z https://developer.tradier.com w `.env` jako
-`EMSCAN_TRADIER_API_KEY` (i w GitHub Secrets przed krokiem 7). Właściciel zakłada konto.
+- **CBOE** `cdn.cboe.com/api/global/delayed_quotes` — jedna odpowiedź zawiera wszystkie
+  wygaśnięcia **oraz** kwotowanie instrumentu bazowego, więc skan nie mnoży zapytań. Pokrycie
+  sprawdzone na 10 tickerach: 9 zwróciło łańcuch, w tym spółki notowane po 54 centy.
+  HTTP 403 oznacza brak notowanych opcji (`SymbolNotCovered`), nie awarię.
+- **Nasdaq** `quote/{ticker}/historical` — 511 sesji wstecz, czyli dokładnie tyle, ile potrzebuje
+  backfill uzgodniony na 2 lata. Ten sam host i format liczb co kalendarz.
 
-Do czasu dostarczenia klucza kroki 5, 6 i 8 pozostają zablokowane. Kroki 3–4 są od niego niezależne
-— dostawca opcji wchodzi za gotowy interfejs `OptionsChainSource`.
+**Blocker zdjęty. Nic nie czeka na klucz.**
 
 ## Decyzje podjęte w kroku 3 (2026-08-13, sesja 2)
 
@@ -77,20 +80,32 @@ duplikat zawyży statystyki historyczne spółki.
 Stan obecny: `engine.events.find_adjacent_date_conflicts()` takie pary **wykrywa i raportuje**,
 ale niczego nie scala. Polityka scalania do ustalenia przed krokiem 8 (backfill).
 
+## Kwestia otwarta: korekty o splity
+
+Nie wiadomo, czy Nasdaq zwraca ceny surowe, czy skorygowane o splity. Split między
+`baseline_close` a sesją rozliczeniową zafałszowałby ruch o rząd wielkości, więc **przed krokiem 6**
+trzeba to sprawdzić na konkretnym historycznym splicie. Do tego czasu nie zakładamy żadnego
+wariantu — patrz `docs/METHODOLOGY.md` §6.
+
 ## Start następnej sesji
 
-Następny jest **krok 4** — silnik EM. Wymaga klucza Tradiera, więc kolejność jest taka:
+Następny jest **krok 4** — `engine/expected_move.py`. Nic go już nie blokuje: źródła stoją,
+fixtures są nagrane.
 
-1. **Klucz do `.env`** jako `EMSCAN_TRADIER_API_KEY` (rejestracja na developer.tradier.com)
-2. **Sprawdzić kształt odpowiedzi Tradiera** przed pisaniem parsera — dopisać sekcję do
-   `scripts/probe_sources.py` i zobaczyć realny JSON. To się opłaciło przy Nasdaqu: pole
-   `time` miało `time-not-supplied` w 54% rekordów, czego z dokumentacji nie dało się przewidzieć
-3. `TradierOptionsSource` i `TradierPriceSource` za gotowymi interfejsami `OptionsChainSource`
-   i `PriceSource` z `sources/base.py`
-4. `engine/expected_move.py` — trzy warianty EM, testy na fixtures łańcucha opcji
+Do zrobienia w kroku 4:
+
+1. wybór wygaśnięcia (najwcześniejsze `>= session_date`) i strike'u ATM (najbliższy spot)
+2. `mid = (bid + ask) / 2`, a przy zerowym bid lub ask zejście na `lastPrice` **wraz z flagą**
+   `zero_bid` — źródło zwraca wtedy `mid = None` właśnie po to, żeby silnik musiał się określić
+3. trzy warianty EM (A: `0.85 × straddle`, B: 60/30/10, C: `spot × IV × sqrt(dte/365)`)
+4. flagi jakości: `wide_spread` przy spreadzie > 25%, `low_oi`, `dte_gt_2`, `stale_quote`
+   z porównania `data_timestamp()` z momentem pobrania
+
+Fixtures pod to są gotowe i celowo kontrastowe: **AMAT** nie ma ani jednego zerowego bid,
+**ABEO** ma 14 takich kontraktów na 24. Pierwszy testuje ścieżkę czystą, drugi ścieżkę z flagami.
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
-`docs/PROBE-2026-08-13.md`. Nie każ czytać całego repo.
+`docs/PROBE-2026-08-17.md`. Nie każ czytać całego repo.
 
 ### Co już stoi i czego nie trzeba pisać od nowa
 
@@ -98,7 +113,10 @@ Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.
 - `sources/base.py` — interfejsy `EarningsCalendarSource`, `OptionsChainSource`, `PriceSource`
   oraz typy `OptionQuote`, `OptionChain`, `DailyBar`; `OptionQuote.mid` zwraca `None` przy
   zerowym bid/ask, bo zejście na `lastPrice` to decyzja silnika EM — to on podnosi flagę `zero_bid`
-- `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi
+- `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi;
+  `not_covered_statuses` odróżnia brak instrumentu od awarii
+- `sources/cboe.py` — łańcuch opcji i spot z jednej odpowiedzi, cache w pamięci, symbole OCC
+- `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz
 - `db.py` — schemat trzech tabel gotowy, w tym `em_snapshots` na trzy warianty EM
 - `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
 

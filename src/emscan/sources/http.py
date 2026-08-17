@@ -21,7 +21,7 @@ from tenacity import (
 )
 
 from emscan.log import get_logger
-from emscan.sources.base import SourceDataError, SourceUnavailable
+from emscan.sources.base import SourceDataError, SourceUnavailable, SymbolNotCovered
 
 log = get_logger(__name__)
 
@@ -41,6 +41,9 @@ class HttpFetcher:
             bezpiecznie poniżej limitu.
         retry_backoff: mnożnik oczekiwania między próbami. Testy podają 0, żeby nie
             spać naprawdę.
+        not_covered_statuses: kody, które u tego dostawcy oznaczają „nie prowadzę
+            danych dla tego symbolu", a nie awarię. CBOE zwraca 403 dla spółek bez
+            notowanych opcji — patrz SymbolNotCovered.
         raw_dir: katalog na surowe odpowiedzi; None wyłącza cache.
         headers: nagłówki dokładane do każdego zapytania.
     """
@@ -53,6 +56,7 @@ class HttpFetcher:
         max_retries: int = 3,
         min_interval: float = 0.0,
         retry_backoff: float = 1.0,
+        not_covered_statuses: frozenset[int] = frozenset(),
         raw_dir: Path | None = None,
         headers: dict[str, str] | None = None,
     ) -> None:
@@ -61,6 +65,7 @@ class HttpFetcher:
         self.raw_dir = raw_dir
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        self._not_covered_statuses = not_covered_statuses
         self._last_request_at = 0.0
         self._client = httpx.Client(
             timeout=timeout,
@@ -148,6 +153,10 @@ class HttpFetcher:
 
         if response.status_code in _RETRYABLE_STATUS:
             raise SourceUnavailable(f"{self.source_name}: HTTP {response.status_code} — ponawialny")
+        if response.status_code in self._not_covered_statuses:
+            raise SymbolNotCovered(
+                f"{self.source_name}: HTTP {response.status_code} — brak danych dla symbolu"
+            )
         if response.status_code >= 400:
             # 401/403 to zwykle brak lub wygaśnięcie klucza; ponawianie nic nie da.
             raise SourceDataError(f"{self.source_name}: HTTP {response.status_code}")

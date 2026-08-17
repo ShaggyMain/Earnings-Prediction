@@ -71,8 +71,9 @@ Wszystkie daty w ISO, strefa `America/New_York`.
 - **Historyczne ceny opcji są płatne**, więc historyczny EM buduje się wyłącznie do przodu, dzień
   po dniu. Historyczne **ruchy po wynikach** są darmowe — i dlatego faza 2 trenuje właśnie na nich,
   a EM służy jedynie jako punkt odniesienia w dniu skanu.
-- **yfinance daje dane opóźnione**, a po sesji często `bid = 0`. Skan musi lecieć w trakcie sesji,
-  inaczej EM jest niepoliczalny lub zafałszowany.
+- **Kwotowania opcji są opóźnione** o około 15 minut, a poza sesją bywają zerowe. Skan musi
+  lecieć w trakcie sesji, inaczej EM jest niepoliczalny lub zafałszowany. Snapshot zapisuje
+  zarówno moment pobrania, jak i znacznik czasu podany przez dostawcę.
 - **Flaga BMO/AMC bywa błędna** i potrafi się zmienić na kilka dni przed publikacją. Stąd
   weryfikacja krzyżowa z kilku źródeł i zapisywane `timing_confidence`. Brak danych = `UNKNOWN`,
   nigdy zgadywanie.
@@ -102,13 +103,17 @@ kierunku i mimo to stracić. Każdy backtest w tym repo liczy wejście po ask i 
 | Warstwa | Kolejność |
 |---|---|
 | Kalendarz wyników | Nasdaq → Finnhub → yfinance (weryfikacja krzyżowa) |
-| Łańcuch opcji | Tradier sandbox → yfinance (tylko lokalnie) → Polygon.io (opcjonalnie) |
-| Ceny OHLC | Tradier sandbox → yfinance (tylko lokalnie) |
+| Łańcuch opcji **i cena spot** | CBOE (`delayed_quotes`) |
+| Historia cen OHLC | Nasdaq (`quote/{ticker}/historical`) |
 
-Kolejność łańcucha opcji i cen wynika z diagnostyki z 13.08.2026: yfinance nie działa za proxy
-(`curl_cffi` podszywa się pod TLS-fingerprint przeglądarki, czego re-terminacja TLS nie przepuszcza),
-Yahoo odpowiada wtedy 429, a stooq stawia challenge anty-botowy. Pełny wynik i dane liczbowe:
-[`docs/PROBE-2026-08-13.md`](docs/PROBE-2026-08-13.md).
+Żadne z tych źródeł nie wymaga klucza ani rejestracji. Jedno zapytanie do CBOE zwraca komplet
+wygaśnięć wraz z ceną instrumentu bazowego, więc skan nie mnoży zapytań.
+
+Kolejność wynika z dwóch diagnostyk. [`docs/PROBE-2026-08-13.md`](docs/PROBE-2026-08-13.md)
+pokazał, że yfinance za proxy nie działa (`curl_cffi` podszywa się pod TLS-fingerprint
+przeglądarki, czego re-terminacja TLS nie przepuszcza), Yahoo odpowiada wtedy 429, a stooq stawia
+challenge anty-botowy. [`docs/PROBE-2026-08-17.md`](docs/PROBE-2026-08-17.md) sprawdził
+alternatywy: CBOE zwrócił łańcuch dla 9 z 10 testowanych spółek, w tym notowanych po 54 centy.
 
 MarketChameleon bywa użyteczny jako punkt odniesienia do **ręcznej** weryfikacji. Repo nie zawiera
 i nie będzie zawierać scrapera tego serwisu — dane EM są tam za logowaniem, a automatyczne

@@ -39,3 +39,20 @@ def finnhub_13() -> Any:
 @pytest.fixture
 def finnhub_14() -> Any:
     return load_fixture("finnhub_earnings_2026-08-14.json")
+
+
+@pytest.fixture
+def cboe_amat() -> Any:
+    """Spółka płynna: wszystkie 24 kontrakty mają niezerowe bid i ask."""
+    return load_fixture("cboe_options_AMAT.json")
+
+
+@pytest.fixture
+def cboe_abeo() -> Any:
+    """Mikrospółka: 14 z 24 kontraktów ma bid = 0 — materiał na flagę zero_bid."""
+    return load_fixture("cboe_options_ABEO.json")
+
+
+@pytest.fixture
+def nasdaq_history() -> Any:
+    return load_fixture("nasdaq_historical_AMAT.json")
