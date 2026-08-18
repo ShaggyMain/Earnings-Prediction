@@ -18,7 +18,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from emscan.models import EarningsEvent, RawEarningsRecord, Timing, TimingConfidence
+from emscan.models import (
+    EarningsEvent,
+    EmSnapshot,
+    QualityFlag,
+    RawEarningsRecord,
+    Timing,
+    TimingConfidence,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS earnings_events (
@@ -106,6 +113,24 @@ def init_schema(conn: sqlite3.Connection) -> None:
 def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     """Połączenie z gotowym schematem, zamykane po wyjściu z bloku."""
     conn = connect(db_path)
+    try:
+        init_schema(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def open_memory_db() -> Iterator[sqlite3.Connection]:
+    """Baza w pamięci — `scan --dry-run` i testy.
+
+    Dzięki temu „na próbę" znaczy dokładnie ten sam przepływ, z prawdziwymi kluczami
+    obcymi i prawdziwym `event_id`, tylko bez śladu na dysku. Alternatywa — udawany
+    identyfikator zdarzenia — wymagałaby fałszowania danych w silniku.
+    """
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         init_schema(conn)
         yield conn
@@ -213,3 +238,111 @@ def event_id_for(conn: sqlite3.Connection, ticker: str, event_date: date) -> int
     )
     row = cur.fetchone()
     return int(row["id"]) if row else None
+
+
+# ------------------------------------------------------------------ em_snapshots
+
+
+def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
+    """Dopisuje snapshot EM i zwraca jego identyfikator.
+
+    Tabela celowo nie ma `UNIQUE(event_id)`: snapshot jest **pomiarem w chwili**, a nie
+    stanem zdarzenia. Dwa skany tego samego dnia dają dwa wiersze i to jest wartość —
+    widać, jak EM zmieniał się w miarę zbliżania się do publikacji. Raport bierze
+    najświeższy wiersz na zdarzenie.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO em_snapshots
+            (event_id, snapshot_at, spot, expiry, dte, atm_strike,
+             call_bid, call_ask, put_bid, put_ask, call_mid, put_mid,
+             straddle, em_abs, em_pct, em_abs_weighted, em_pct_weighted, em_pct_iv,
+             iv_atm, oi_atm, volume_atm, rel_spread, quality_flags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot.event_id,
+            snapshot.snapshot_at.isoformat(),
+            snapshot.spot,
+            snapshot.expiry.isoformat(),
+            snapshot.dte,
+            snapshot.atm_strike,
+            snapshot.call_bid,
+            snapshot.call_ask,
+            snapshot.put_bid,
+            snapshot.put_ask,
+            snapshot.call_mid,
+            snapshot.put_mid,
+            snapshot.straddle,
+            snapshot.em_abs,
+            snapshot.em_pct,
+            snapshot.em_abs_weighted,
+            snapshot.em_pct_weighted,
+            snapshot.em_pct_iv,
+            snapshot.iv_atm,
+            snapshot.oi_atm,
+            snapshot.volume_atm,
+            snapshot.rel_spread,
+            json.dumps([str(flag) for flag in snapshot.quality_flags]),
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _row_to_snapshot(row: sqlite3.Row) -> EmSnapshot:
+    return EmSnapshot(
+        event_id=int(row["event_id"]),
+        snapshot_at=datetime.fromisoformat(row["snapshot_at"]),
+        spot=row["spot"],
+        expiry=date.fromisoformat(row["expiry"]),
+        dte=int(row["dte"]),
+        atm_strike=row["atm_strike"],
+        call_bid=row["call_bid"],
+        call_ask=row["call_ask"],
+        put_bid=row["put_bid"],
+        put_ask=row["put_ask"],
+        call_mid=row["call_mid"],
+        put_mid=row["put_mid"],
+        straddle=row["straddle"],
+        em_abs=row["em_abs"],
+        em_pct=row["em_pct"],
+        em_abs_weighted=row["em_abs_weighted"],
+        em_pct_weighted=row["em_pct_weighted"],
+        em_pct_iv=row["em_pct_iv"],
+        iv_atm=row["iv_atm"],
+        oi_atm=row["oi_atm"],
+        volume_atm=row["volume_atm"],
+        rel_spread=row["rel_spread"],
+        quality_flags=[QualityFlag(flag) for flag in json.loads(row["quality_flags"])],
+    )
+
+
+def latest_snapshots_for_session(
+    conn: sqlite3.Connection, session_date: date
+) -> list[tuple[EarningsEvent, EmSnapshot]]:
+    """Najświeższy snapshot na zdarzenie, dla wszystkich zdarzeń danej sesji.
+
+    To jest grupowanie ze SPEC §1 — AMC z D-1 i BMO z D razem. Zdarzenia bez snapshotu
+    (odrzucone przez filtry albo z niepoliczalnym EM) po prostu nie mają tu pary; w tabeli
+    `earnings_events` zostają nietknięte.
+    """
+    events: dict[int, EarningsEvent] = {}
+    for row in conn.execute(
+        "SELECT * FROM earnings_events WHERE session_date = ? ORDER BY ticker",
+        (session_date.isoformat(),),
+    ):
+        events[int(row["id"])] = _row_to_event(row)
+    if not events:
+        return []
+
+    placeholders = ",".join("?" * len(events))
+    latest: dict[int, EmSnapshot] = {}
+    for row in conn.execute(
+        # Sortowanie rosnąco po snapshot_at sprawia, że ostatni wpis do słownika jest
+        # najświeższy. Liczba znaków zapytania pochodzi z długości listy, nie z danych.
+        f"SELECT * FROM em_snapshots WHERE event_id IN ({placeholders}) ORDER BY snapshot_at",
+        tuple(events),
+    ):
+        latest[int(row["event_id"])] = _row_to_snapshot(row)
+
+    return [(event, latest[event_id]) for event_id, event in events.items() if event_id in latest]

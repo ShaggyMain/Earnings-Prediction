@@ -27,7 +27,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 3 | Warstwa źródeł + `models.py` + `db.py` | ✅ zrobione | 103 testy bez sieci, ruff + mypy --strict zielone |
 | 3b | Źródła opcji (CBOE) i cen (Nasdaq) | ✅ zrobione | 135 testów, CI zielone |
 | 4 | Silnik EM (`engine/expected_move.py`) | ✅ zrobione | 188 testów bez sieci, ruff + mypy --strict zielone; METHODOLOGY §2-4 wypełnione |
-| 5 | `scan` + raport | ⬜ | Prawdziwy skan w oknie sesji, raport md |
+| 5 | `scan` + raport | 🟡 kod gotowy | 266 testów bez sieci, wiring sprawdzony na żywym API (6 zapytań). **Zostaje skan w oknie 15:30 ET** |
 | 6 | `settle` + `outcomes` | ⬜ | Rozliczenie kolejnej sesji, testy AMC/BMO/święto |
 | 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ⬜ | Asercja okna sesji w ET, sekrety z GitHub Secrets |
 | 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
@@ -89,6 +89,76 @@ Wyjątek podnosimy **tylko** wtedy, gdy EM nie istnieje: `NoUsableExpiry`, `NoAt
 `NoAtmPrice`. Wszystko inne — szeroki spread, niskie OI, stara kwota, odległe wygaśnięcie — jest
 flagą i wchodzi do bazy (SPEC §1.4).
 
+## Decyzje podjęte w kroku 5 (2026-08-18, sesja 4)
+
+### Wolumen 20d — kaskada, wariant trzeci
+
+Pytanie z poprzedniej sesji rozstrzygnięte: **Nasdaq dostaje zapytanie tylko o tickery, które
+przeżyły wszystkie tańsze filtry**. Kolejność etapów jest opisana w docstringu
+`engine/universe.py`:
+
+| Etap | Co odrzuca | Koszt |
+|---|---|---|
+| 0 | brak jednoznacznej sesji (DMH, sprzeczne źródła) | 0 |
+| 1 | brak opcji, brak wygaśnięcia, `spot` pod progiem, wolumen sesji pod podłogą | 1 zapytanie (CBOE) |
+| 2 | niskie OI, EM pod progiem | 0 — łańcuch już jest |
+| 3 | średni wolumen 20-sesyjny pod progiem | 1 zapytanie (Nasdaq), tylko dla ocalałych |
+
+Wolumen bieżącej sesji z CBOE jest w etapie 1 **podłogą**, nie kryterium: próg to 20%
+`min_volume_20d`. Twarde porównanie jednego dnia z progiem 20-sesyjnym wyrzucałoby spółki, które
+miały spokojny dzień przed wynikami — czyli akurat te, o które w tym projekcie chodzi.
+Rozstrzyga dopiero prawdziwa średnia w etapie 3.
+
+Skuteczność widać w wyniku skanu: `price_lookups` mówi, ile razy poszło zapytanie do Nasdaqa.
+W próbnym przebiegu na żywych danych było ich **0 na 4 kandydatów** — wszystko odpadło wcześniej.
+
+### Pozostałe decyzje
+
+| Temat | Decyzja | Dlaczego tak |
+|---|---|---|
+| `--date` | Zawsze **dzień skanu** D, we wszystkich komendach | SPEC §1.1 używa tej samej daty dla `scan`, `settle` i `report`. Sesją jest pierwsza sesja po D |
+| Nazwa pliku raportu | `reports/scan-<sesja>.<format>` | Raport dotyczy sesji, nie dnia skanu — i po sesji rozliczenie znajdzie swój plik |
+| Zapis snapshotów | Zapisujemy **każdy** policzony EM, także pod progiem | To poprawny pomiar. Faza 2 potrzebuje całego rozkładu VRP, nie tylko ogona (SPEC §2.1) |
+| Próg EM w raporcie | Raport filtruje sam, `--min-em 0` pokazuje wszystko | Konsekwencja decyzji wyżej: baza jest kompletna, więc raport musi mieć własny próg |
+| Wiele snapshotów na zdarzenie | Dozwolone, raport bierze najświeższy | Snapshot jest pomiarem w chwili. Dwa skany dnia pokazują, jak EM rósł przed publikacją |
+| `--dry-run` | Baza **w pamięci**, ten sam przepływ | Alternatywa — udawany `event_id` — wymagałaby fałszowania danych w silniku |
+| Awaria jednego tickera | Powód `SOURCE_ERROR` w wyniku + log, skan idzie dalej | Zadanie wsadowe. Powód wchodzi do podsumowania, więc nie jest to ciche tłumienie |
+| Awaria wszystkich kalendarzy | Wyjątek | Skan bez kalendarza nie ma czego liczyć |
+| Brak klucza Finnhuba | Skan działa, ostrzeżenie w logu, pewność max MEDIUM | Jedno źródło to nadal dane, tylko słabiej potwierdzone |
+| Kolumny raportu | SPEC §1.1 + `dte`, trzy metody EM osobno, `flagi` | `dte` bo mnożnik 0.85 zakłada bliskie wygaśnięcie; flagi bo raport bez `zero_bid` wprowadzałby w błąd |
+| `--min-oi` w CLI | **Dodane** poza listą flag ze SPEC §1.7 | Patrz kwestia otwarta niżej — próg 100 odrzuca płynne spółki. Pozostałe trzy filtry miały flagi, ten nie, co wygląda na przeoczenie w SPEC |
+| Brak `settle`/`stats`/`backfill` | Komend nie ma, nie ma też atrap | Komenda, która nic nie robi, jest gorsza od jej braku |
+| `close()` w interfejsach źródeł | Dodane do `sources/base.py` jako domyślnie puste | Każde źródło trzyma klienta HTTP; CLI musi je zamknąć nie wiedząc, które to które |
+
+`engine/scan.py` jest dodatkiem do struktury ze SPEC §1.3 (która wymienia w `engine/` trzy pliki).
+Orkiestracja siedzi tam, a nie w `__main__.py`, żeby dała się testować bez uruchamiania CLI.
+
+## Kwestia otwarta: próg `oi_atm >= 100` odrzuca płynne spółki
+
+Wyszło z próbnego skanu na żywych danych 18.08. Na czterech tickerach z kalendarza:
+
+| Ticker | Spot | `oi_atm` | EM% (A) | Wynik |
+|---|---:|---:|---:|---|
+| KEYS | 361,02 | 52 | 7,70% | odrzucony: `low_oi` |
+| ADI | 391,50 | 34 | 5,29% | odrzucony: `low_oi` |
+| LOW | 216,83 | — | 4,23% | odrzucony: `low_em` |
+| TJX | 151,40 | — | 3,85% | odrzucony: `low_em` |
+
+ADI i KEYS to spółki o kapitalizacji rzędu 100 mld USD — problemem nie jest ich płynność, tylko
+to, że **OI rozkłada się na wiele strike'ów**. Przy cenie 390 USD i odstępie strike'ów 2,5 USD
+na jeden strike zostaje kilkadziesiąt kontraktów, choć cały łańcuch ma ich 1556.
+
+Trzy możliwe kierunki, żaden nie przesądzony (SPEC podaje 100 wprost, więc zmiana wymaga decyzji
+właściciela):
+
+1. `oi_atm` jako **suma** obu nóg zamiast minimum — podnosi wartość dwukrotnie, ale nie zmienia
+   proporcji między spółkami
+2. Próg **zależny od ceny** albo od odstępu strike'ów — trafniejsze, ale wprowadza parametr,
+   którego SPEC nie definiuje
+3. OI **tylko jako flaga**, bez odrzucania — najbliższe zasadzie „nie usuwaj, flaguj" (SPEC §1.4)
+
+Do czasu decyzji: próg zostaje 100, a `--min-oi` pozwala go obniżyć na jeden przebieg.
+
 ## Kwestia otwarta: źródła niezgodne co do **daty** publikacji
 
 Osobny problem od konfliktu pory. 13.08 pięć spółek — ACTU, AIRE, FSI, SOWG, VNRX —
@@ -114,47 +184,53 @@ wariantu — patrz `docs/METHODOLOGY.md` §6.
 
 ## Start następnej sesji
 
-Następny jest **krok 5** — `scan` + raport. To pierwszy krok, który dotyka żywej sieci.
+Do zamknięcia kroku 5 zostaje **jedna rzecz: skan na żywo w oknie 15:30 ET**. Kod jest gotowy
+i sprawdzony na prawdziwych odpowiedziach API, ale bramka ze SPEC mówi o skanie w oknie sesji.
 
-Do zrobienia w kroku 5:
+```bash
+python -m emscan scan --date <dziś> --dry-run     # najpierw na próbę, nic nie zapisze
+python -m emscan scan --date <dziś>               # potem na serio
+python -m emscan report --date <dziś> --format md
+```
 
-1. `__main__.py` — CLI w typerze, komenda `scan --date --min-em --min-price --min-volume --top --dry-run`
-2. `engine/universe.py` — filtry ze SPEC §1.5: `spot >= 5`, wolumen 20d `>= 500k`, istnieje
-   expiry `>= session_date`, `oi_atm >= 100`, `em_pct >= 0.06`
-3. `db.insert_snapshot()` + odczyt snapshotów — tabela `em_snapshots` istnieje, brakuje operacji
-4. `reporting/` — raport md z kolumnami ze SPEC §1.1
-5. Przepływ skanu: kalendarz D i D+1 → `merge_records` → `is_scannable` → dla każdego tickera
-   łańcuch z CBOE → `select_expiry` → `compute_expected_move` → zapis
+Czego się spodziewać poza oknem: flagi `stale_quote` na wszystkim i zerowe bidy na mikrospółkach.
+To ograniczenie CBOE, nie błąd kodu. Wygaśnięcie tygodniowe wypada w piątek, więc przy skanie
+we wtorek `dte` wynosi 3 i **wszystko dostanie flagę `dte_gt_2`** — dokładnie tak, jak SPEC to
+przewiduje w §1.5.
 
-**Decyzja do podjęcia w kroku 5:** skąd wolumen 20d. Nasdaq historical to **jedno zapytanie na
-ticker**, czyli przy ~400 spółkach 400 zapytań na skan. CBOE podaje `volume` bieżącej sesji w tej
-samej odpowiedzi co łańcuch, więc może posłużyć jako tani filtr wstępny (kaskada ze SPEC §B.2,
-Stage 0) — kosztem tego, że jeden dzień to nie średnia 20-sesyjna. Wariant trzeci: liczyć wolumen
-20d tylko dla tickerów, które przeszły pozostałe filtry.
+Potem **krok 6** — `settle` + `outcomes`. Do zrobienia:
 
-**Okno czasowe:** skan na żywych danych ma sens 15:30 ET (SPEC §1.8), czyli 30 minut przed
-zamknięciem. Uruchomiony rano lub po sesji zwróci kwotowania z flagą `stale_quote` i zerowymi
-bidami — to ograniczenie źródła, nie błąd kodu.
+1. `engine/outcomes.py` — `baseline_close`, `gap_pct`, `close_pct`, `intraday_pct`, `direction`,
+   `abs_move_pct`, `em_ratio`, `vrp`, `exceeded_em` (wzory w SPEC §1.6 i METHODOLOGY §5)
+2. `db.insert_outcome()` + podłączenie mapy rozliczeń do raportu — `rows_from_snapshots()`
+   przyjmuje `outcomes` już teraz, żeby nie zmieniać kontraktu
+3. Komenda `settle --date` w CLI
+4. Sytuacje brzegowe ze SPEC §1.6: święto, zawieszenie notowań, przełożona publikacja → `NO_DATA`,
+   nigdy zero
+5. **Najpierw weryfikacja polityki splitów** — patrz kwestia otwarta wyżej. Bez tego rozliczenie
+   spółki po splicie da ruch o rząd wielkości za duży
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
 `docs/METHODOLOGY.md`. Nie każ czytać całego repo.
 
 ### Co już stoi i czego nie trzeba pisać od nowa
 
-- `trading_calendar.py` — sesje NYSE regułami, działa dla dowolnego roku (backfill też)
-- `sources/base.py` — interfejsy `EarningsCalendarSource`, `OptionsChainSource`, `PriceSource`
-  oraz typy `OptionQuote`, `OptionChain`, `DailyBar`; `OptionQuote.mid` zwraca `None` przy
-  zerowym bid/ask, bo zejście na `lastPrice` to decyzja silnika EM — to on podnosi flagę `zero_bid`
+- `trading_calendar.py` — sesje NYSE regułami, godziny sesji (`is_in_session`), dowolny rok
+- `sources/base.py` — interfejsy trzech rodzajów źródeł, typy `OptionQuote`, `OptionChain`,
+  `DailyBar`; `close()` oraz opcjonalne `data_timestamp()` i `underlying_volume()`
 - `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi;
   `not_covered_statuses` odróżnia brak instrumentu od awarii
-- `sources/cboe.py` — łańcuch opcji i spot z jednej odpowiedzi, cache w pamięci, symbole OCC,
-  `data_timestamp()` pod flagę `stale_quote`
+- `sources/cboe.py` — łańcuch, spot, wolumen i znacznik czasu z jednej odpowiedzi
 - `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz
 - `engine/events.py` — scalanie kalendarzy, `timing_confidence`, `session_date_for`,
-  `baseline_date_for`
-- `engine/expected_move.py` — `select_expiry`, `select_atm_strike`, `leg_price`,
-  `compute_expected_move` (trzy metody + pięć flag jakości)
-- `db.py` — schemat trzech tabel gotowy, operacje **tylko** na `earnings_events`
+  `baseline_date_for` (to ostatnie czeka na krok 6 i jest już przetestowane)
+- `engine/expected_move.py` — trzy metody EM, pięć flag jakości
+- `engine/universe.py` — progi filtrów, `RejectReason`, kaskada
+- `engine/scan.py` — `run_scan`, `target_session`, `ScanResult` z licznikami i powodami odrzuceń
+- `reporting/report.py` — md, csv, html; kolumny rozliczeniowe czekają na `settle`
+- `__main__.py` — CLI: `scan`, `report`
+- `db.py` — operacje na `earnings_events` i `em_snapshots`; `outcomes` ma tylko schemat
+- `tests/fakes.py` — atrapy trzech źródeł, każda umie udawać awarię; gotowe pod krok 6
 - `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji

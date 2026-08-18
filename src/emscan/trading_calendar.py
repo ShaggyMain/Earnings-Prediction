@@ -9,11 +9,23 @@ wiedzy i nie zależy od niczego poza stdlib, żeby dało się go testować bez s
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 _SATURDAY = 5
 _SUNDAY = 6
+
+ET = ZoneInfo("America/New_York")
+
+MARKET_OPEN = time(9, 30)
+MARKET_CLOSE = time(16, 0)
+"""Zwykłe godziny sesji NYSE w czasie nowojorskim.
+
+Skrócone sesje (wigilia, dzień po Święcie Dziękczynienia — zamknięcie 13:00) nie są tu
+uwzględnione: dla skanu, który interesuje okno 15:30, oznacza to jedynie ostrzeżenie
+zamiast twardej blokady. Krok 7 zamienia to na asercję i wtedy trzeba je dodać.
+"""
 
 # Sesje zamknięte poza zwykłym kalendarzem świąt — żałoby narodowe, klęski żywiołowe.
 # Lista jest prowadzona ręcznie i NIE jest kompletna wstecz. Przy rozszerzaniu
@@ -129,3 +141,21 @@ def previous_trading_day(day: date) -> date:
 def trading_day_on_or_after(day: date) -> date:
     """`day`, jeśli jest sesją; w przeciwnym razie najbliższa sesja po nim."""
     return day if is_trading_day(day) else next_trading_day(day)
+
+
+def is_in_session(moment: datetime) -> bool:
+    """Czy dany moment wypada w godzinach zwykłej sesji NYSE.
+
+    Skan poza sesją nie jest błędem kodu, ale kwotowania są wtedy nieodświeżane i często
+    jednostronne (SPEC §Ograniczenia) — dlatego pytanie ma sens dla ostrzeżenia w logu.
+
+    Raises:
+        ValueError: moment bez strefy czasowej. Naiwny znacznik porównany z godzinami
+            nowojorskimi daje cichy błąd kilku godzin — SPEC §1.7.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("is_in_session wymaga znacznika ze strefą — patrz SPEC §1.7")
+    local = moment.astimezone(ET)
+    if not is_trading_day(local.date()):
+        return False
+    return MARKET_OPEN <= local.time() <= MARKET_CLOSE

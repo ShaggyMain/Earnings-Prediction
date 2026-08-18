@@ -50,19 +50,28 @@ cp .env.example .env      # uzupełnij klucze
 
 ## Użycie
 
-> Komendy CLI powstają w krokach 5–8 fazy 1. Na razie działa wyłącznie skrypt diagnostyczny.
-
 ```bash
-python scripts/probe_sources.py          # sprawdza, czy źródła dziś odpowiadają
+python -m emscan scan   --date 2026-08-18 --min-em 6 --dry-run
+python -m emscan scan   --date 2026-08-18            # zapisuje snapshoty do bazy
+python -m emscan report --date 2026-08-18 --format md
 ```
 
-Docelowo:
+`--date` oznacza **dzień skanu**. Raport dotyczy pierwszej sesji po nim — tam konsumują się
+zarówno AMC z dnia skanu, jak i BMO z tej sesji. Plik raportu jest nazwany sesją.
+
+Sensowne okno skanu to **15:30 ET**, pół godziny przed zamknięciem. Wcześniej i po sesji CBOE
+oddaje kwotowania nieodświeżane, więc snapshoty dostają flagi `stale_quote` i `zero_bid` — to
+ograniczenie źródła, nie błąd. `--dry-run` przechodzi całą ścieżkę na bazie w pamięci.
+
+Filtry uniwersum (`--min-em` w procentach, `--min-price`, `--min-volume`, `--min-oi`) nadpisują
+wartości z `.env` na jeden przebieg. Baza zapisuje **każdy** policzony snapshot, także poniżej
+progu EM — próg dotyczy raportu, nie danych. `report --min-em 0` pokazuje wszystko, co zmierzono.
 
 ```bash
-python -m emscan scan   --date 2026-08-13 --min-em 6
-python -m emscan settle --date 2026-08-13
-python -m emscan report --date 2026-08-13 --format md
+python scripts/probe_sources.py          # diagnostyka: czy źródła dziś odpowiadają
 ```
+
+`settle`, `stats` i `backfill` powstają w krokach 6 i 8 — atrap dla nich nie ma.
 
 Wszystkie daty w ISO, strefa `America/New_York`.
 
