@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -32,8 +33,34 @@ from emscan.models import (
 ET = ZoneInfo("America/New_York")
 runner = CliRunner()
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(text: str) -> str:
+    """Tekst bez kolorów i bez łamania linii.
+
+    Rich koloruje pomoc i komunikaty błędów, a przy okazji **rozbija nazwy opcji**: `--dry-run`
+    trafia do wyjścia jako `-` + `-dry` + `-run` ze znacznikami ANSI pomiędzy. Kolor włącza się
+    na GitHub Actions, a lokalnie nie — asercja na surowym wydruku przechodziła u mnie i padała
+    na CI. Dlatego: albo tekst przez ten filtr, albo (lepiej) asercja na zachowaniu.
+    """
+    return " ".join(_ANSI.sub("", text).split())
+
+
 SCAN_DAY = date(2026, 8, 17)
 SESSION = date(2026, 8, 18)
+
+
+@pytest.fixture(autouse=True)
+def force_colour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wymusza kolorowanie wyjścia w każdym teście CLI.
+
+    GitHub Actions włącza kolor, a lokalny terminal w testach nie — i właśnie na tej różnicy
+    przeszły u mnie dwa testy, które padły na CI. Wymuszenie tu sprawia, że warunek z CI jest
+    warunkiem domyślnym: nowa asercja na renderowanym tekście pęknie od razu, u autora.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
 
 
 @pytest.fixture
@@ -84,10 +111,11 @@ def seed_snapshot(db_path: Path, *, ticker: str = "LIQD", em_pct: float = 0.085)
 
 
 def test_help_lists_the_implemented_commands() -> None:
+    """Nazwy komend nie mają dywizów, więc rich ich nie rozbija — tu tekst jest bezpieczny."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "scan" in result.stdout
-    assert "report" in result.stdout
+    for command in ("scan", "settle", "report"):
+        assert command in plain(result.stdout)
 
 
 def test_unimplemented_commands_are_absent_not_faked() -> None:
@@ -96,18 +124,48 @@ def test_unimplemented_commands_are_absent_not_faked() -> None:
     assert runner.invoke(app, ["backfill", "--from", "2024-01-01"]).exit_code != 0
 
 
-def test_scan_help_lists_the_filter_overrides() -> None:
-    result = runner.invoke(app, ["scan", "--help"])
+def test_scan_accepts_every_filter_override(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wszystkie progi nadpisywalne z CLI. Nieznana flaga dałaby kod 2, więc to je weryfikuje.
+
+    Skan pomijamy oknem sesji, żeby test nie tknął sieci — sprawdzamy parsowanie argumentów,
+    nie przepływ.
+    """
+    monkeypatch.setattr("emscan.__main__._now", lambda: OUTSIDE_WINDOW)
+    result = runner.invoke(
+        app,
+        [
+            "scan",
+            "--window",
+            "skip",
+            "--min-em",
+            "6",
+            "--min-price",
+            "5",
+            "--min-volume",
+            "500000",
+            "--min-oi",
+            "100",
+            "--top",
+            "5",
+            "--dry-run",
+        ],
+    )
     assert result.exit_code == 0
-    for flag in ("--dry-run", "--min-em", "--min-price", "--min-volume", "--min-oi"):
-        assert flag in result.stdout
+    assert "pomijam skan" in result.stdout
+
+
+def test_scan_rejects_an_unknown_flag() -> None:
+    """Kontrola dla testu wyżej: gdyby flagi nie istniały, kod wyjścia byłby właśnie taki."""
+    assert runner.invoke(app, ["scan", "--min-nonsense", "1"]).exit_code == 2
 
 
 def test_non_iso_date_is_rejected(workspace: Path) -> None:
     """SPEC §1.7: wszystkie daty ISO. Komunikat błędu idzie na stderr."""
     result = runner.invoke(app, ["report", "--date", "17.08.2026"])
     assert result.exit_code == 2
-    assert "ISO" in result.stderr
+    assert "ISO" in plain(result.stderr)
 
 
 # ------------------------------------------------------------------ raport
@@ -198,10 +256,11 @@ def seed_outcome(db_path: Path, *, ticker: str = "LIQD") -> None:
 # ------------------------------------------------------------------ settle
 
 
-def test_settle_help_explains_which_events_it_touches() -> None:
-    result = runner.invoke(app, ["settle", "--help"])
+def test_settle_accepts_an_explicit_date(workspace: Path) -> None:
+    """Bez snapshotów w bazie nie ma o co pytać źródła cen, więc test nie rusza sieci."""
+    result = runner.invoke(app, ["settle", "--date", SCAN_DAY.isoformat()])
     assert result.exit_code == 0
-    assert "--date" in result.stdout
+    assert "rozliczonych: 0" in result.stdout
 
 
 def test_settle_without_snapshots_does_nothing_and_says_so(workspace: Path) -> None:
