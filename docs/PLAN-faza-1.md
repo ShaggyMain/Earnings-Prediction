@@ -26,7 +26,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | — | ~~STOP — decyzja o źródle opcji i cen~~ | ✅ rozstrzygnięte | CBOE + Nasdaq, bez klucza |
 | 3 | Warstwa źródeł + `models.py` + `db.py` | ✅ zrobione | 103 testy bez sieci, ruff + mypy --strict zielone |
 | 3b | Źródła opcji (CBOE) i cen (Nasdaq) | ✅ zrobione | 135 testów, CI zielone |
-| 4 | Silnik EM (`engine/expected_move.py`) | ⬜ | Testy 3 metod (A/B/C) + mapowanie BMO/AMC → `session_date` |
+| 4 | Silnik EM (`engine/expected_move.py`) | ✅ zrobione | 188 testów bez sieci, ruff + mypy --strict zielone; METHODOLOGY §2-4 wypełnione |
 | 5 | `scan` + raport | ⬜ | Prawdziwy skan w oknie sesji, raport md |
 | 6 | `settle` + `outcomes` | ⬜ | Rozliczenie kolejnej sesji, testy AMC/BMO/święto |
 | 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ⬜ | Asercja okna sesji w ET, sekrety z GitHub Secrets |
@@ -64,6 +64,31 @@ i bez rejestracji** — pełny wynik badania w `docs/PROBE-2026-08-17.md`:
 | `timing_confidence` | Enum HIGH / MEDIUM / LOW / UNKNOWN. HIGH = dwa źródła zgodne, MEDIUM = jedno źródło zna porę, LOW = konflikt (timing wynikowy UNKNOWN), UNKNOWN = nikt nie wie | `models.TimingConfidence`, `engine.events.resolve_timing` |
 | `eps_actual_present` | Zapisywane jako informacja i logowane przy konflikcie, ale **nie** rozstrzyga, które źródło ma rację | `models.RawEarningsRecord`, `engine.events.merge_records` |
 
+## Decyzje podjęte w kroku 4 (2026-08-18, sesja 3)
+
+SPEC §1.5 podaje wzory, ale nie rozstrzyga kilku sytuacji, które w prawdziwych danych występują
+od pierwszego skanu. Każda z tych decyzji jest opisana w `docs/METHODOLOGY.md` §2-3 i pokryta
+testem — tu jest tylko rejestr, żeby nie trzeba było ich odtwarzać z kodu.
+
+| Temat | Decyzja | Dlaczego tak |
+|---|---|---|
+| Drabinka strike'ów | ATM i skrzydła wybieramy **tylko** ze strike'ów kwotowanych po obu stronach | Noga bez pary jest bezużyteczna dla wszystkich trzech metod |
+| Remis przy wyborze ATM | Wygrywa strike **niższy** | Reguła arbitralna, ale deterministyczna — dwa skany tego samego łańcucha muszą dać ten sam wiersz |
+| `rel_spread` | Spread **gorszej** nogi; przy kwotowaniu jednostronnym `NULL` | Fill zabija noga słabsza. Zmyślony spread byłby gorszy od braku |
+| `oi_atm` vs `volume_atm` | OI = **minimum** obu nóg, wolumen = **suma** | OI jest warunkiem dopuszczenia (rządzi noga słabsza), wolumen tylko miarą aktywności |
+| `zero_bid` | Flaga obejmuje też skrzydła metody B, nie tylko ATM | Flaga opisuje jakość całego snapshotu |
+| `lastPrice` = 0 | Traktowane jako brak danych | Zero to nie darmowa opcja |
+| Metoda B bez skrzydła | `NULL`, bez podstawiania sąsiada i bez przeskalowania wag | Jedno i drugie zmieniłoby definicję metody bez śladu w danych |
+| Metoda C przy `dte < 1` | `NULL` | `sqrt(0)` dałoby EM równy zero, czyli ciche zero zakazane przez SPEC |
+| `iv = 0.0` od CBOE | Traktowane jako brak IV | Dostawca zwraca zero dla części kontraktów — patrz AMAT 500C w fixture |
+| Próg `stale_quote` | 30 minut, parametr | Dwukrotność typowego opóźnienia CBOE. Samo opóźnienie 15 minut nie jest wadą |
+| `snapshot_at` bez strefy | `ValueError` | O 22:00 ET jest już następny dzień UTC — naiwny znacznik zmienia `dte` bez śladu |
+| `event_id` w snapshocie | Podaje wołający (`scan`), silnik go nie wymyśla | `EmSnapshot` jest wierszem tabeli, nie czystym wynikiem obliczenia |
+
+Wyjątek podnosimy **tylko** wtedy, gdy EM nie istnieje: `NoUsableExpiry`, `NoAtmStrike`,
+`NoAtmPrice`. Wszystko inne — szeroki spread, niskie OI, stara kwota, odległe wygaśnięcie — jest
+flagą i wchodzi do bazy (SPEC §1.4).
+
 ## Kwestia otwarta: źródła niezgodne co do **daty** publikacji
 
 Osobny problem od konfliktu pory. 13.08 pięć spółek — ACTU, AIRE, FSI, SOWG, VNRX —
@@ -89,23 +114,30 @@ wariantu — patrz `docs/METHODOLOGY.md` §6.
 
 ## Start następnej sesji
 
-Następny jest **krok 4** — `engine/expected_move.py`. Nic go już nie blokuje: źródła stoją,
-fixtures są nagrane.
+Następny jest **krok 5** — `scan` + raport. To pierwszy krok, który dotyka żywej sieci.
 
-Do zrobienia w kroku 4:
+Do zrobienia w kroku 5:
 
-1. wybór wygaśnięcia (najwcześniejsze `>= session_date`) i strike'u ATM (najbliższy spot)
-2. `mid = (bid + ask) / 2`, a przy zerowym bid lub ask zejście na `lastPrice` **wraz z flagą**
-   `zero_bid` — źródło zwraca wtedy `mid = None` właśnie po to, żeby silnik musiał się określić
-3. trzy warianty EM (A: `0.85 × straddle`, B: 60/30/10, C: `spot × IV × sqrt(dte/365)`)
-4. flagi jakości: `wide_spread` przy spreadzie > 25%, `low_oi`, `dte_gt_2`, `stale_quote`
-   z porównania `data_timestamp()` z momentem pobrania
+1. `__main__.py` — CLI w typerze, komenda `scan --date --min-em --min-price --min-volume --top --dry-run`
+2. `engine/universe.py` — filtry ze SPEC §1.5: `spot >= 5`, wolumen 20d `>= 500k`, istnieje
+   expiry `>= session_date`, `oi_atm >= 100`, `em_pct >= 0.06`
+3. `db.insert_snapshot()` + odczyt snapshotów — tabela `em_snapshots` istnieje, brakuje operacji
+4. `reporting/` — raport md z kolumnami ze SPEC §1.1
+5. Przepływ skanu: kalendarz D i D+1 → `merge_records` → `is_scannable` → dla każdego tickera
+   łańcuch z CBOE → `select_expiry` → `compute_expected_move` → zapis
 
-Fixtures pod to są gotowe i celowo kontrastowe: **AMAT** nie ma ani jednego zerowego bid,
-**ABEO** ma 14 takich kontraktów na 24. Pierwszy testuje ścieżkę czystą, drugi ścieżkę z flagami.
+**Decyzja do podjęcia w kroku 5:** skąd wolumen 20d. Nasdaq historical to **jedno zapytanie na
+ticker**, czyli przy ~400 spółkach 400 zapytań na skan. CBOE podaje `volume` bieżącej sesji w tej
+samej odpowiedzi co łańcuch, więc może posłużyć jako tani filtr wstępny (kaskada ze SPEC §B.2,
+Stage 0) — kosztem tego, że jeden dzień to nie średnia 20-sesyjna. Wariant trzeci: liczyć wolumen
+20d tylko dla tickerów, które przeszły pozostałe filtry.
+
+**Okno czasowe:** skan na żywych danych ma sens 15:30 ET (SPEC §1.8), czyli 30 minut przed
+zamknięciem. Uruchomiony rano lub po sesji zwróci kwotowania z flagą `stale_quote` i zerowymi
+bidami — to ograniczenie źródła, nie błąd kodu.
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
-`docs/PROBE-2026-08-17.md`. Nie każ czytać całego repo.
+`docs/METHODOLOGY.md`. Nie każ czytać całego repo.
 
 ### Co już stoi i czego nie trzeba pisać od nowa
 
@@ -115,9 +147,14 @@ Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.
   zerowym bid/ask, bo zejście na `lastPrice` to decyzja silnika EM — to on podnosi flagę `zero_bid`
 - `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi;
   `not_covered_statuses` odróżnia brak instrumentu od awarii
-- `sources/cboe.py` — łańcuch opcji i spot z jednej odpowiedzi, cache w pamięci, symbole OCC
+- `sources/cboe.py` — łańcuch opcji i spot z jednej odpowiedzi, cache w pamięci, symbole OCC,
+  `data_timestamp()` pod flagę `stale_quote`
 - `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz
-- `db.py` — schemat trzech tabel gotowy, w tym `em_snapshots` na trzy warianty EM
+- `engine/events.py` — scalanie kalendarzy, `timing_confidence`, `session_date_for`,
+  `baseline_date_for`
+- `engine/expected_move.py` — `select_expiry`, `select_atm_strike`, `leg_price`,
+  `compute_expected_move` (trzy metody + pięć flag jakości)
+- `db.py` — schemat trzech tabel gotowy, operacje **tylko** na `earnings_events`
 - `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji
