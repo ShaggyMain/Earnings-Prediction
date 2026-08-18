@@ -127,34 +127,100 @@ najbliższego wygaśnięcia z kolejnym) — jest zaplanowane jako **v2** i celow
 
 ## 5. Rozliczenie (`settle`)
 
-_(do uzupełnienia w kroku 6)_
+Implementacja: `engine/outcomes.py`, testy: `tests/test_engine_outcomes.py`.
 
 ```
 gap_pct      = open(S)  / baseline_close - 1
 close_pct    = close(S) / baseline_close - 1
 intraday_pct = close(S) / open(S) - 1
-direction    = UP jeśli close_pct > 0 else DOWN
+direction    = UP jeśli close_pct > 0, DOWN jeśli < 0, FLAT jeśli == 0
 abs_move_pct = |close_pct|
 em_ratio     = abs_move_pct / em_pct
 vrp          = em_pct - abs_move_pct
 ```
 
 Raportujemy **oba** pomiary — gap i close-to-close. Przy AMC rynek często odwraca ruch z otwarcia,
-więc sam gap daje mylący obraz.
+więc sam gap daje mylący obraz. `intraday_pct` mierzy właśnie to odwrócenie i jest materiałem na
+model D3 z fazy 3 (SPEC §3.1).
+
+Jedno odstępstwo od litery SPEC §1.6: dla ruchu **dokładnie zerowego** zapisujemy `FLAT`, a nie
+`DOWN`. Enum ma tę wartość, a nazwanie zera spadkiem byłoby zmyśleniem kierunku, którego nie było.
+
+### Które zdarzenia rozliczamy
+
+Te, które mają **snapshot EM**. `settle` domyka pętlę EM -> realizacja, więc pyta o ceny tylko
+o tickery, dla których EM w ogóle policzyliśmy — kaskada ze SPEC §B.2 obowiązuje i tutaj. Ruchy
+całego uniwersum, potrzebne fazie 2 jako target, zbiera `backfill` (krok 8), nie `settle`.
+
+Zdarzenie bez EM (odrzucone przez filtry, bez notowanych opcji) ma `em_ratio`, `vrp`
+i `exceeded_em` równe `NULL`, jeśli kiedykolwiek zostanie rozliczone — ruch bez punktu
+odniesienia jest wciąż danymi, ale nie udajemy, że mamy z czym go porównać.
 
 ### Sytuacje brzegowe
 
 | Sytuacja | Zachowanie |
 |---|---|
-| Święto / brak sesji | przesuń `session_date` na najbliższą sesję |
-| Zawieszenie notowań | `NO_DATA`, **nie** zero |
-| Przełożona publikacja | `NO_DATA` + flaga, rekord zostaje |
-| Split między D a D+1 | patrz niżej |
+| Święto / brak sesji | `session_date` i `baseline_close` liczone po kalendarzu giełdowym |
+| Zawieszenie notowań w sesji rozliczeniowej | brak wiersza + powód `no_session_bar` |
+| Zawieszenie notowań przed publikacją | brak wiersza + powód `no_baseline_bar` |
+| Brak historii cen | brak wiersza + powód `no_price_history` |
+| Awaria źródła dla jednego tickera | brak wiersza + powód `source_error`, reszta rozliczona |
+| `baseline_close <= 0` | `ValueError` — dzielenie przez zero nie ma znaczenia |
+| Ruch powyżej 50% | wiersz powstaje, ostrzeżenie w logu (patrz §6) |
+
+**Jak wygląda `NO_DATA` w praktyce.** Tabela `outcomes` nie ma kolumny na powód, a SPEC §1.6
+zabrania wpisywania zera. Dlatego stan `NO_DATA` to **brak wiersza**: zdarzenie zostaje
+w `earnings_events` ze swoim snapshotem, a nazwany powód trafia do wyniku `settle` i do logu.
+Ponowne uruchomienie rozliczenia nadpisuje wiersz — pierwszy przebieg mógł trafić w moment,
+w którym sesja jeszcze się nie zamknęła.
+
+**Czego nie umiemy wykryć: przełożonej publikacji.** SPEC §1.6 wymienia ją obok zawieszenia
+notowań, ale z samych cen nie da się jej odczytać — sesja się odbyła, ruch był, tylko nie
+z powodu wyników. Nie udajemy detekcji: `settle` policzy taki ruch normalnie. Jedyny sygnał,
+jakim dysponujemy, to `eps_actual_present` z kalendarza, i on rozstrzyga zbyt słabo, żeby na nim
+opierać odrzucenie. Zapisane jako znane ograniczenie, do rozważenia w fazie 2 przy czyszczeniu
+zbioru treningowego.
 
 ## 6. Polityka korekt o splity
 
-_(do uzupełnienia w kroku 6)_
+**Zweryfikowane 2026-08-18 na żywym API, nie założone: Nasdaq zwraca ceny skorygowane
+o splity, retroaktywnie.**
 
-Split pomiędzy `baseline_close` a sesją rozliczeniową zafałszuje ruch o rząd wielkości, jeśli jedna
-z cen jest skorygowana, a druga nie. Wymagane: jawne stwierdzenie, **których** cen używamy
-(surowych czy skorygowanych) i z którego źródła, oraz test na konkretnym historycznym splicie.
+Metoda nie zakładała znajomości dat splitów — szukała w szeregach największych skoków
+dzień-do-dnia. Split w danych surowych daje skok rzędu mnożnika; w danych skorygowanych nie ma
+go wcale. Sprawdzone na pięciu spółkach, które w oknie dwóch lat miały split, i jednej
+kontrolnej bez splitu:
+
+| Ticker | Split | Cena z 2024-08-01 wg API | Cena przed splitem / mnożnik |
+|---|---|---:|---|
+| LRCX | 10:1 (X 2024) | 83,03 | ~830 / 10 |
+| ORLY | 15:1 (VI 2025) | 75,56 | ~1133 / 15 |
+| IBKR | 4:1 (VI 2025) | 29,75 | ~119 / 4 |
+| ANET | 4:1 (XII 2024) | 84,66 | ~338 / 4 |
+| PANW | 2:1 (XII 2024) | 157,81 | ~316 / 2 |
+| AMAT | bez splitu | 196,30 | — |
+
+W żadnym z sześciu szeregów nie ma skoku powyżej 30%, a poziom cen sprzed splitu jest dokładnie
+podzielony przez mnożnik. Wniosek jest jednoznaczny.
+
+### Dwie konsekwencje, obie wpisane w kod
+
+1. **`baseline_close` i świeca sesji pochodzą z jednego zapytania.** Dwa zapytania rozdzielone
+   splitem trafiłyby na dwie różne skale i dały ruch zafałszowany o mnożnik. Jedno zapytanie
+   gwarantuje wspólną skalę bez względu na to, kiedy split wypadł.
+2. **Między `scan` a `settle` porównujemy wyłącznie ułamki.** `em_pct` i `abs_move_pct` są
+   niezmienne przy zmianie skali cen, więc `em_ratio` pozostaje poprawny nawet wtedy, gdy split
+   wypadł między snapshotem a rozliczeniem. Gdybyśmy porównywali `spot` ze snapshotu z ceną
+   z rozliczenia, ten sam split zepsułby wynik — i właśnie dlatego tego nie robimy.
+
+### Czego weryfikacja nie objęła
+
+**Korekt o dywidendy.** Tą metodą nie da się ich rozpoznać: dywidenda to ułamek procenta, nie
+skok. Ponieważ obie ceny biorą się z jednego zapytania, ewentualny artefakt dotyczy tylko dnia
+ex-dividend i jest rzędu 0,5% — mniej niż typowy ruch po wynikach, ale nie zero. Jeśli faza 2
+zacznie liczyć cechy z dokładnością do pojedynczych punktów bazowych, to trzeba sprawdzić
+osobno.
+
+Progu podejrzliwości nie usuwamy z kodu, mimo że źródło koryguje ceny: ruch powyżej 50%
+w sesji rozliczeniowej dostaje ostrzeżenie w logu. Zwykle jest prawdziwy (biotech po wynikach
+badania), ale zanim taka obserwacja wejdzie do cech fazy 2, warto ją obejrzeć.

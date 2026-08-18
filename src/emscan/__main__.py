@@ -1,8 +1,8 @@
 """CLI — SPEC §1.7.
 
-Zaimplementowane są `scan` i `report` (krok 5). `settle`, `stats` i `backfill` powstają
-w krokach 6 i 8 — celowo nie ma dla nich atrap, bo komenda, która niczego nie robi, jest
-gorsza od komendy, której nie ma.
+Zaimplementowane są `scan`, `settle` i `report`. `stats` i `backfill` powstają w kroku 8 —
+celowo nie ma dla nich atrap, bo komenda, która niczego nie robi, jest gorsza od komendy,
+której nie ma.
 
 **Znaczenie `--date` jest jedno we wszystkich komendach: to dzień skanu D.** Sesją, o którą
 chodzi, jest pierwsza sesja po D — tam konsumują się zarówno AMC z dnia D, jak i BMO z tej
@@ -25,7 +25,13 @@ from zoneinfo import ZoneInfo
 import typer
 
 from emscan.config import Settings, get_settings
-from emscan.db import latest_snapshots_for_session, open_db, open_memory_db
+from emscan.db import (
+    latest_snapshots_for_session,
+    open_db,
+    open_memory_db,
+    outcomes_for_session,
+)
+from emscan.engine.outcomes import SettleResult, run_settle
 from emscan.engine.scan import ScanResult, run_scan, target_session
 from emscan.engine.universe import UniverseFilters
 from emscan.log import configure_logging, get_logger
@@ -172,6 +178,38 @@ def _echo_summary(result: ScanResult, *, top: int) -> None:
         )
 
 
+def _echo_settlement(result: SettleResult) -> None:
+    """Podsumowanie rozliczenia. Oba pomiary ruchu, bo gap i close-to-close mówią różne rzeczy."""
+    typer.echo(
+        f"rozliczenie sesji {result.session_date.isoformat()} "
+        f"(odniesienie: zamknięcie {result.baseline_date.isoformat()})"
+    )
+    typer.echo(
+        f"kandydatów ze snapshotem: {len(result.rows)}, rozliczonych: {len(result.settled)}, "
+        f"ruch przebił EM: {result.exceeded_em}"
+    )
+    if result.missing:
+        powody = ", ".join(f"{reason}={count}" for reason, count in result.missing.items())
+        typer.echo(f"bez rozliczenia: {powody}")
+
+    if not result.settled:
+        return
+
+    typer.echo("")
+    typer.echo(f"{'ticker':<8}{'timing':<8}{'gap%':>8}{'close%':>9}{'kier.':>7}{'em_ratio':>10}")
+    for row in sorted(
+        result.settled, key=lambda r: r.outcome.abs_move_pct if r.outcome else 0.0, reverse=True
+    ):
+        outcome = row.outcome
+        if outcome is None:  # pragma: no cover - filtr wyżej to wyklucza
+            continue
+        ratio = f"{outcome.em_ratio:.2f}" if outcome.em_ratio is not None else "-"
+        typer.echo(
+            f"{row.ticker:<8}{row.event.timing!s:<8}{outcome.gap_pct * 100:>8.2f}"
+            f"{outcome.close_pct * 100:>9.2f}{outcome.direction!s:>7}{ratio:>10}"
+        )
+
+
 @app.callback()
 def main(
     log_level: Annotated[
@@ -246,6 +284,39 @@ def scan(
 
 
 @app.command()
+def settle(day: DateOption = None) -> None:
+    """Rozliczenie sesji następującej po dniu skanu — SPEC §1.6.
+
+    Pyta o ceny tylko te tickery, dla których jest snapshot EM: `settle` domyka pętlę
+    EM -> realizacja, a ruchy całego uniwersum zbierze `backfill`. Uruchomienie przed
+    zamknięciem sesji nie psuje danych — kolejny przebieg nadpisze rozliczenie.
+    """
+    settings = get_settings()
+    scan_date = _parse_day(day)
+    raw_dir = settings.resolved_raw_dir() / scan_date.isoformat()
+
+    prices = NasdaqPriceSource(
+        user_agent=settings.user_agent,
+        timeout=settings.http_timeout,
+        max_retries=settings.http_max_retries,
+        raw_dir=raw_dir,
+    )
+    try:
+        with open_db(settings.resolved_db_path()) as conn:
+            result = run_settle(
+                scan_date=scan_date,
+                conn=conn,
+                prices=prices,
+                settled_at=datetime.now(tz=ET),
+            )
+    finally:
+        prices.close()
+
+    _echo_settlement(result)
+    typer.echo(f"raport: python -m emscan report --date {scan_date.isoformat()}")
+
+
+@app.command()
 def report(
     day: DateOption = None,
     fmt: Annotated[ReportFormat, typer.Option("--format", help="md, csv albo html")] = (
@@ -271,10 +342,11 @@ def report(
 
     with open_db(settings.resolved_db_path()) as conn:
         pairs = latest_snapshots_for_session(conn, session_date)
+        outcomes = outcomes_for_session(conn, session_date)
 
     rows = [
         row
-        for row in rows_from_snapshots(pairs)
+        for row in rows_from_snapshots(pairs, outcomes)
         if row.snapshot.em_pct is not None and row.snapshot.em_pct >= threshold
     ]
     if top is not None:
@@ -283,6 +355,7 @@ def report(
     notes: Sequence[str] = [
         f"Dzień skanu: {scan_date.isoformat()}",
         f"Próg EM: {threshold * 100:.2f}% (snapshotów w bazie dla tej sesji: {len(pairs)})",
+        f"Rozliczonych zdarzeń: {len(outcomes)}",
     ]
     text = render(
         rows,

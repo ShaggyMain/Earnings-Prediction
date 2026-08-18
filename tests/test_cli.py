@@ -12,10 +12,18 @@ from typer.testing import CliRunner
 
 from emscan.__main__ import app
 from emscan.config import get_settings
-from emscan.db import event_id_for, insert_snapshot, open_db, upsert_events
+from emscan.db import (
+    event_id_for,
+    insert_outcome,
+    insert_snapshot,
+    open_db,
+    upsert_events,
+)
 from emscan.models import (
+    Direction,
     EarningsEvent,
     EmSnapshot,
+    Outcome,
     QualityFlag,
     Timing,
     TimingConfidence,
@@ -83,8 +91,9 @@ def test_help_lists_the_implemented_commands() -> None:
 
 
 def test_unimplemented_commands_are_absent_not_faked() -> None:
-    """`settle` powstaje w kroku 6 — komenda, która nic nie robi, byłaby gorsza od jej braku."""
-    assert runner.invoke(app, ["settle", "--date", "2026-08-17"]).exit_code != 0
+    """`stats` i `backfill` powstają w kroku 8 — atrapa byłaby gorsza od braku komendy."""
+    assert runner.invoke(app, ["stats"]).exit_code != 0
+    assert runner.invoke(app, ["backfill", "--from", "2024-01-01"]).exit_code != 0
 
 
 def test_scan_help_lists_the_filter_overrides() -> None:
@@ -159,3 +168,57 @@ def test_report_min_em_zero_shows_everything_measured(workspace: Path) -> None:
     assert result.exit_code == 0
     assert "zdarzeń w raporcie: 1" in result.stdout
     assert "CALM" in (workspace / "reports" / "scan-2026-08-18.md").read_text(encoding="utf-8")
+
+
+def seed_outcome(db_path: Path, *, ticker: str = "LIQD") -> None:
+    """Dokłada rozliczenie do istniejącego snapshotu."""
+    with open_db(db_path) as conn:
+        event_id = event_id_for(conn, ticker, SCAN_DAY)
+        assert event_id is not None
+        insert_outcome(
+            conn,
+            Outcome(
+                event_id=event_id,
+                baseline_close=100.0,
+                next_open=104.0,
+                next_close=106.0,
+                gap_pct=0.04,
+                close_pct=0.06,
+                intraday_pct=0.019,
+                direction=Direction.UP,
+                abs_move_pct=0.06,
+                em_ratio=0.71,
+                vrp=0.025,
+                exceeded_em=False,
+                settled_at=datetime(2026, 8, 18, 17, 0, tzinfo=ET),
+            ),
+        )
+
+
+# ------------------------------------------------------------------ settle
+
+
+def test_settle_help_explains_which_events_it_touches() -> None:
+    result = runner.invoke(app, ["settle", "--help"])
+    assert result.exit_code == 0
+    assert "--date" in result.stdout
+
+
+def test_settle_without_snapshots_does_nothing_and_says_so(workspace: Path) -> None:
+    """Bez snapshotów nie ma o co pytać źródła cen — więc ta komenda nie rusza sieci."""
+    result = runner.invoke(app, ["settle", "--date", SCAN_DAY.isoformat()])
+    assert result.exit_code == 0
+    assert "rozliczonych: 0" in result.stdout
+
+
+def test_report_fills_the_settlement_columns(workspace: Path) -> None:
+    seed_snapshot(workspace / "emscan.db")
+    seed_outcome(workspace / "emscan.db")
+    result = runner.invoke(app, ["report", "--date", SCAN_DAY.isoformat()])
+    assert result.exit_code == 0
+
+    text = (workspace / "reports" / "scan-2026-08-18.md").read_text(encoding="utf-8")
+    row = next(line for line in text.splitlines() if line.startswith("| LIQD"))
+    cells = [cell.strip() for cell in row.strip("|").split("|")]
+    assert cells[9:12] == ["6.00%", "UP", "0.71"]
+    assert "Rozliczonych zdarzeń: 1" in text

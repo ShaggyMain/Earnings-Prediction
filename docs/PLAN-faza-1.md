@@ -28,7 +28,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 3b | Źródła opcji (CBOE) i cen (Nasdaq) | ✅ zrobione | 135 testów, CI zielone |
 | 4 | Silnik EM (`engine/expected_move.py`) | ✅ zrobione | 188 testów bez sieci, ruff + mypy --strict zielone; METHODOLOGY §2-4 wypełnione |
 | 5 | `scan` + raport | 🟡 kod gotowy | 266 testów bez sieci, wiring sprawdzony na żywym API (6 zapytań). **Zostaje skan w oknie 15:30 ET** |
-| 6 | `settle` + `outcomes` | ⬜ | Rozliczenie kolejnej sesji, testy AMC/BMO/święto |
+| 6 | `settle` + `outcomes` | ✅ zrobione | 297 testów bez sieci; testy AMC/BMO/święto/weekend, polityka splitów zweryfikowana na żywych danych |
 | 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ⬜ | Asercja okna sesji w ET, sekrety z GitHub Secrets |
 | 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
 | 9 | **STOP** — akceptacja przed fazą 2 | ⬜ | — |
@@ -175,40 +175,55 @@ duplikat zawyży statystyki historyczne spółki.
 Stan obecny: `engine.events.find_adjacent_date_conflicts()` takie pary **wykrywa i raportuje**,
 ale niczego nie scala. Polityka scalania do ustalenia przed krokiem 8 (backfill).
 
-## Kwestia otwarta: korekty o splity
+## ~~Kwestia otwarta: korekty o splity~~ — rozstrzygnięte 2026-08-18
 
-Nie wiadomo, czy Nasdaq zwraca ceny surowe, czy skorygowane o splity. Split między
-`baseline_close` a sesją rozliczeniową zafałszowałby ruch o rząd wielkości, więc **przed krokiem 6**
-trzeba to sprawdzić na konkretnym historycznym splicie. Do tego czasu nie zakładamy żadnego
-wariantu — patrz `docs/METHODOLOGY.md` §6.
+**Nasdaq zwraca ceny skorygowane o splity, retroaktywnie.** Sprawdzone na pięciu spółkach ze
+splitem w oknie dwóch lat (LRCX 10:1, ORLY 15:1, IBKR 4:1, ANET 4:1, PANW 2:1) i jednej
+kontrolnej: w żadnym szeregu nie ma skoku dzień-do-dnia powyżej 30%, a poziom cen sprzed splitu
+jest dokładnie podzielony przez mnożnik. Pełny dowód i konsekwencje dla kodu w
+`docs/METHODOLOGY.md` §6.
+
+Praktycznie znaczy to dwie rzeczy: `settle` bierze `baseline_close` i świecę sesji **z jednego
+zapytania** (dwa zapytania rozdzielone splitem dałyby dwie skale), a między `scan` a `settle`
+porównujemy wyłącznie ułamki, które są niezmienne przy zmianie skali. Niezweryfikowane zostają
+korekty o dywidendy — tą metodą nierozpoznawalne, rzędu 0,5%, opisane jako znane ograniczenie.
+
+## Decyzje podjęte w kroku 6 (2026-08-18, sesja 5)
+
+| Temat | Decyzja | Dlaczego tak |
+|---|---|---|
+| Co rozliczamy | Zdarzenia **ze snapshotem EM** | `settle` domyka pętlę EM -> realizacja. Ruchy całego uniwersum to zadanie `backfill` (krok 8), który jest zbiorem treningowym fazy 2 |
+| `NO_DATA` | **Brak wiersza** w `outcomes` + nazwany powód w wyniku i logu | Tabela nie ma kolumny na powód, a SPEC §1.6 zabrania zera. Nieobecność wiersza JEST tym stanem |
+| Powody pominięcia | `no_session_bar`, `no_baseline_bar`, `no_price_history`, `source_error` | „Notowania stały" to inny problem niż „sesja się jeszcze nie zamknęła" i musi się inaczej nazywać |
+| Ruch zerowy | `FLAT`, nie `DOWN` | Odstępstwo od litery SPEC §1.6. Enum ma tę wartość, a nazwanie zera spadkiem zmyśla kierunek |
+| Zdarzenie bez EM | `em_ratio`, `vrp`, `exceeded_em` = `NULL` | Ruch bez punktu odniesienia to wciąż dane, ale nie ma z czym go porównać |
+| `baseline_close <= 0` | `ValueError` | Dzielenie przez zero albo cenę ujemną daje liczbę bez znaczenia |
+| Ponowny `settle` | Nadpisuje wiersz (`UNIQUE(event_id)`) | Rozliczenie to **stan** zdarzenia, w odróżnieniu od snapshotu, który jest pomiarem w chwili |
+| Awaria jednego tickera | Powód `source_error`, reszta rozliczona | Tak samo jak w skanie: zadanie wsadowe nie może padać od jednego tickera |
+| Ruch powyżej 50% | Wiersz powstaje, ostrzeżenie w logu | Źródło koryguje splity, więc taki ruch jest zwykle prawdziwy — ale wart obejrzenia przed fazą 2 |
+| Przełożona publikacja | **Nie wykrywamy**, opisane jako ograniczenie | Z samych cen nie da się jej odczytać. `eps_actual_present` rozstrzyga za słabo, żeby na nim odrzucać |
 
 ## Start następnej sesji
 
-Do zamknięcia kroku 5 zostaje **jedna rzecz: skan na żywo w oknie 15:30 ET**. Kod jest gotowy
-i sprawdzony na prawdziwych odpowiedziach API, ale bramka ze SPEC mówi o skanie w oknie sesji.
+Otwarte zostają dwie rzeczy z poprzednich kroków, obie wymagające **twojej decyzji albo
+uruchomienia**, nie kodu:
 
-```bash
-python -m emscan scan --date <dziś> --dry-run     # najpierw na próbę, nic nie zapisze
-python -m emscan scan --date <dziś>               # potem na serio
-python -m emscan report --date <dziś> --format md
-```
+1. **Skan na żywo w oknie 15:30 ET** — bramka kroku 5. Kod gotowy, sprawdzony na prawdziwych
+   odpowiedziach API. Po skanie: `settle` następnego dnia po 17:00 ET i `report`.
+2. **Próg `oi_atm >= 100`** — odrzuca ADI i KEYS, spółki po 100 mld USD (kwestia otwarta wyżej).
 
-Czego się spodziewać poza oknem: flagi `stale_quote` na wszystkim i zerowe bidy na mikrospółkach.
-To ograniczenie CBOE, nie błąd kodu. Wygaśnięcie tygodniowe wypada w piątek, więc przy skanie
-we wtorek `dte` wynosi 3 i **wszystko dostanie flagę `dte_gt_2`** — dokładnie tak, jak SPEC to
-przewiduje w §1.5.
+Następny krok kodu to **7 — GitHub Actions**. Do zrobienia:
 
-Potem **krok 6** — `settle` + `outcomes`. Do zrobienia:
-
-1. `engine/outcomes.py` — `baseline_close`, `gap_pct`, `close_pct`, `intraday_pct`, `direction`,
-   `abs_move_pct`, `em_ratio`, `vrp`, `exceeded_em` (wzory w SPEC §1.6 i METHODOLOGY §5)
-2. `db.insert_outcome()` + podłączenie mapy rozliczeń do raportu — `rows_from_snapshots()`
-   przyjmuje `outcomes` już teraz, żeby nie zmieniać kontraktu
-3. Komenda `settle --date` w CLI
-4. Sytuacje brzegowe ze SPEC §1.6: święto, zawieszenie notowań, przełożona publikacja → `NO_DATA`,
-   nigdy zero
-5. **Najpierw weryfikacja polityki splitów** — patrz kwestia otwarta wyżej. Bez tego rozliczenie
-   spółki po splicie da ruch o rząd wielkości za duży
+1. `.github/workflows/scan.yml` — `cron: "30 19 * * 1-5"` (15:30 ET), `workflow_dispatch`
+2. `.github/workflows/settle.yml` — `cron: "0 21 * * 2-6"` (17:00 ET)
+3. **Asercja okna sesji w ET** — SPEC §1.8 wymaga jej wprost, bo cron w UTC nie przesuwa się
+   z DST i od listopada do marca te same wpisy odpalą się o godzinę wcześniej lokalnie.
+   `trading_calendar.is_in_session()` już to potrafi sprawdzić, brakuje twardego wyjścia z błędem
+4. Sekret `EMSCAN_FINNHUB_API_KEY` z GitHub Secrets
+5. Commit `data/emscan.db` i `reports/` z powrotem do repo — **tu wraca decyzja z sesji 1**:
+   czy bazę commitujemy, czy trzymamy jako artifact. Baza rośnie z każdym skanem, a commit
+   binarki do gita jest nieodwracalny w historii. Bez rozstrzygnięcia tego nie da się napisać
+   końcówki workflow
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
 `docs/METHODOLOGY.md`. Nie każ czytać całego repo.
@@ -218,20 +233,23 @@ Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.
 - `trading_calendar.py` — sesje NYSE regułami, godziny sesji (`is_in_session`), dowolny rok
 - `sources/base.py` — interfejsy trzech rodzajów źródeł, typy `OptionQuote`, `OptionChain`,
   `DailyBar`; `close()` oraz opcjonalne `data_timestamp()` i `underlying_volume()`
-- `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi;
-  `not_covered_statuses` odróżnia brak instrumentu od awarii
+- `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi
 - `sources/cboe.py` — łańcuch, spot, wolumen i znacznik czasu z jednej odpowiedzi
-- `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz
+- `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz, ceny **skorygowane o splity**
 - `engine/events.py` — scalanie kalendarzy, `timing_confidence`, `session_date_for`,
-  `baseline_date_for` (to ostatnie czeka na krok 6 i jest już przetestowane)
+  `baseline_date_for`
 - `engine/expected_move.py` — trzy metody EM, pięć flag jakości
 - `engine/universe.py` — progi filtrów, `RejectReason`, kaskada
 - `engine/scan.py` — `run_scan`, `target_session`, `ScanResult` z licznikami i powodami odrzuceń
-- `reporting/report.py` — md, csv, html; kolumny rozliczeniowe czekają na `settle`
-- `__main__.py` — CLI: `scan`, `report`
-- `db.py` — operacje na `earnings_events` i `em_snapshots`; `outcomes` ma tylko schemat
-- `tests/fakes.py` — atrapy trzech źródeł, każda umie udawać awarię; gotowe pod krok 6
+- `engine/outcomes.py` — `compute_outcome`, `run_settle`, `MissingOutcome`, próg podejrzliwości
+- `reporting/report.py` — md, csv, html; kolumny rozliczeniowe wypełniane po `settle`
+- `__main__.py` — CLI: `scan`, `settle`, `report`
+- `db.py` — pełne operacje na trzech tabelach
+- `tests/fakes.py` — atrapy trzech źródeł, każda umie udawać awarię
 - `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
+
+Czego **nie** ma: `engine/universe.py` nie liczy bety ani ADV z SPEC §2.3 (to faza 2),
+`features/`, `ml/` i `llm/` są puste, `stats` i `backfill` nie istnieją.
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji
 

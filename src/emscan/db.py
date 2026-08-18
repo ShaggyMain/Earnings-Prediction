@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from emscan.models import (
+    Direction,
     EarningsEvent,
     EmSnapshot,
+    Outcome,
     QualityFlag,
     RawEarningsRecord,
     Timing,
@@ -346,3 +348,83 @@ def latest_snapshots_for_session(
         latest[int(row["event_id"])] = _row_to_snapshot(row)
 
     return [(event, latest[event_id]) for event_id, event in events.items() if event_id in latest]
+
+
+# ------------------------------------------------------------------ outcomes
+
+
+def insert_outcome(conn: sqlite3.Connection, outcome: Outcome) -> int:
+    """Zapisuje rozliczenie, nadpisując istniejące dla tego zdarzenia.
+
+    `UNIQUE(event_id)` jest tu zamierzone, w odróżnieniu od snapshotów: rozliczenie to
+    **stan** zdarzenia, nie pomiar w chwili. Ponowny `settle` ma poprawić wynik, jeśli
+    pierwszy przebieg trafił w moment przed zamknięciem sesji.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO outcomes
+            (event_id, baseline_close, next_open, next_close, gap_pct, close_pct,
+             intraday_pct, direction, abs_move_pct, em_ratio, vrp, exceeded_em, settled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_id) DO UPDATE SET
+            baseline_close = excluded.baseline_close,
+            next_open      = excluded.next_open,
+            next_close     = excluded.next_close,
+            gap_pct        = excluded.gap_pct,
+            close_pct      = excluded.close_pct,
+            intraday_pct   = excluded.intraday_pct,
+            direction      = excluded.direction,
+            abs_move_pct   = excluded.abs_move_pct,
+            em_ratio       = excluded.em_ratio,
+            vrp            = excluded.vrp,
+            exceeded_em    = excluded.exceeded_em,
+            settled_at     = excluded.settled_at
+        """,
+        (
+            outcome.event_id,
+            outcome.baseline_close,
+            outcome.next_open,
+            outcome.next_close,
+            outcome.gap_pct,
+            outcome.close_pct,
+            outcome.intraday_pct,
+            str(outcome.direction),
+            outcome.abs_move_pct,
+            outcome.em_ratio,
+            outcome.vrp,
+            None if outcome.exceeded_em is None else int(outcome.exceeded_em),
+            outcome.settled_at.isoformat(),
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _row_to_outcome(row: sqlite3.Row) -> Outcome:
+    return Outcome(
+        event_id=int(row["event_id"]),
+        baseline_close=row["baseline_close"],
+        next_open=row["next_open"],
+        next_close=row["next_close"],
+        gap_pct=row["gap_pct"],
+        close_pct=row["close_pct"],
+        intraday_pct=row["intraday_pct"],
+        direction=Direction(row["direction"]),
+        abs_move_pct=row["abs_move_pct"],
+        em_ratio=row["em_ratio"],
+        vrp=row["vrp"],
+        exceeded_em=None if row["exceeded_em"] is None else bool(row["exceeded_em"]),
+        settled_at=datetime.fromisoformat(row["settled_at"]),
+    )
+
+
+def outcomes_for_session(conn: sqlite3.Connection, session_date: date) -> dict[int, Outcome]:
+    """Rozliczenia zdarzeń danej sesji, po `event_id` — w tej formie bierze je raport."""
+    cur = conn.execute(
+        """
+        SELECT o.* FROM outcomes o
+        JOIN earnings_events e ON e.id = o.event_id
+        WHERE e.session_date = ?
+        """,
+        (session_date.isoformat(),),
+    )
+    return {int(row["event_id"]): _row_to_outcome(row) for row in cur.fetchall()}

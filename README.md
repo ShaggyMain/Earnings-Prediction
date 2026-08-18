@@ -53,6 +53,7 @@ cp .env.example .env      # uzupełnij klucze
 ```bash
 python -m emscan scan   --date 2026-08-18 --min-em 6 --dry-run
 python -m emscan scan   --date 2026-08-18            # zapisuje snapshoty do bazy
+python -m emscan settle --date 2026-08-18            # następnego dnia, po 17:00 ET
 python -m emscan report --date 2026-08-18 --format md
 ```
 
@@ -71,7 +72,12 @@ progu EM — próg dotyczy raportu, nie danych. `report --min-em 0` pokazuje wsz
 python scripts/probe_sources.py          # diagnostyka: czy źródła dziś odpowiadają
 ```
 
-`settle`, `stats` i `backfill` powstają w krokach 6 i 8 — atrap dla nich nie ma.
+`stats` i `backfill` powstają w kroku 8 — atrap dla nich nie ma.
+
+`settle` liczy ruch od zamknięcia ostatniej sesji przed publikacją do zamknięcia sesji
+rozliczeniowej i zapisuje **oba** pomiary: lukę otwarcia i close-to-close. Przy AMC rynek często
+odwraca ruch z otwarcia, więc sam gap myli. Rozliczane są zdarzenia, dla których jest snapshot EM;
+brak kompletnych cen oznacza brak wiersza i nazwany powód w logu — nigdy zero.
 
 Wszystkie daty w ISO, strefa `America/New_York`.
 
@@ -83,6 +89,9 @@ Wszystkie daty w ISO, strefa `America/New_York`.
 - **Kwotowania opcji są opóźnione** o około 15 minut, a poza sesją bywają zerowe. Skan musi
   lecieć w trakcie sesji, inaczej EM jest niepoliczalny lub zafałszowany. Snapshot zapisuje
   zarówno moment pobrania, jak i znacznik czasu podany przez dostawcę.
+- **Ceny z Nasdaqa są skorygowane o splity** (zweryfikowane na pięciu splitach, METHODOLOGY §6),
+  dlatego rozliczenie bierze obie ceny z jednego zapytania, a między skanem i rozliczeniem
+  porównuje wyłącznie ułamki. Korekty o dywidendy pozostają niezweryfikowane — rząd 0,5%.
 - **Flaga BMO/AMC bywa błędna** i potrafi się zmienić na kilka dni przed publikacją. Stąd
   weryfikacja krzyżowa z kilku źródeł i zapisywane `timing_confidence`. Brak danych = `UNKNOWN`,
   nigdy zgadywanie.
