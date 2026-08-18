@@ -12,7 +12,9 @@
 | Pierwszy skan | Na żywo, `--date 2026-08-13`, ok. 15:30 ET | Grupa AMC 13.08 + BMO 14.08, `baseline_close` = close(13.08), rozliczenie na sesji 14.08 |
 | Backfill | 2 lata wstecz, tylko tickery przechodzące filtry płynności | Rząd 1000–1500 spółek, ~15–20k zdarzeń |
 
-**Otwarte, do rozstrzygnięcia przed krokiem 7:** czy `data/emscan.db` commitujemy do repo (spec §1.8), czy trzymamy jako artifact. Baza rośnie z każdym skanem; commit binarki do gita jest nieodwracalny w historii.
+**~~Otwarte: czy `data/emscan.db` commitujemy do repo~~ — rozstrzygnięte 2026-08-18 pomiarem.**
+Commitujemy, zgodnie ze SPEC §1.8. Obawa o rozmiar historii okazała się nieuzasadniona, ale
+dopiero po zmierzeniu — patrz „Decyzje podjęte w kroku 7".
 
 ## Kolejność kroków
 
@@ -29,7 +31,7 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 4 | Silnik EM (`engine/expected_move.py`) | ✅ zrobione | 188 testów bez sieci, ruff + mypy --strict zielone; METHODOLOGY §2-4 wypełnione |
 | 5 | `scan` + raport | 🟡 kod gotowy | 266 testów bez sieci, wiring sprawdzony na żywym API (6 zapytań). **Zostaje skan w oknie 15:30 ET** |
 | 6 | `settle` + `outcomes` | ✅ zrobione | 297 testów bez sieci; testy AMC/BMO/święto/weekend, polityka splitów zweryfikowana na żywych danych |
-| 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ⬜ | Asercja okna sesji w ET, sekrety z GitHub Secrets |
+| 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ✅ zrobione | 336 testów; asercja okna sesji z parą wpisów cron na DST, wspólna grupa `concurrency` |
 | 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
 | 9 | **STOP** — akceptacja przed fazą 2 | ⬜ | — |
 
@@ -203,53 +205,95 @@ korekty o dywidendy — tą metodą nierozpoznawalne, rzędu 0,5%, opisane jako 
 | Ruch powyżej 50% | Wiersz powstaje, ostrzeżenie w logu | Źródło koryguje splity, więc taki ruch jest zwykle prawdziwy — ale wart obejrzenia przed fazą 2 |
 | Przełożona publikacja | **Nie wykrywamy**, opisane jako ograniczenie | Z samych cen nie da się jej odczytać. `eps_actual_present` rozstrzyga za słabo, żeby na nim odrzucać |
 
+## Decyzje podjęte w kroku 7 (2026-08-18, sesja 6)
+
+### Baza w repo — rozstrzygnięte pomiarem, nie przeczuciem
+
+Pierwsze oszacowanie mówiło o setkach megabajtów historii i było **błędne**: zakładało, że git
+nie potrafi deltować pliku SQLite. Pomiar to wywrócił. Trzydzieści dziennych commitów rosnącej
+bazy, potem `git gc --aggressive`:
+
+| Wariant | `.git` po 30 commitach | Ekstrapolacja na rok (250 sesji) |
+|---|---:|---:|
+| commit binarki `emscan.db` | 0,59 MB | **~5 MB** |
+| commit eksportu tekstowego | 0,06 MB | ~1 MB |
+
+Sama baza rośnie o **283 kB na sesję**, czyli ~71 MB po roku (350 zdarzeń, 60 snapshotów
+i 60 rozliczeń dziennie). Git kompresuje ją 20-krotnie i deltuje kolejne wersje, bo dopisywanie
+wierszy zmienia tylko część stron pliku.
+
+**Decyzja: commitujemy binarkę, jak mówi SPEC §1.8.** Wariant tekstowy jest pięciokrotnie
+oszczędniejszy, ale wymagałby warstwy eksport/import i dawałby oszczędność 4 MB rocznie —
+to nie jest cena warta dodatkowego kodu i dodatkowego miejsca na błąd. Wariant „tylko artifact"
+odpada niezależnie od rozmiarów: artefakty wygasają, a faza 1 buduje zbiór **do przodu**
+przez miesiące, więc utrata retencji oznaczałaby utratę całego dorobku.
+
+### Pozostałe decyzje
+
+| Temat | Decyzja | Dlaczego tak |
+|---|---|---|
+| DST | **Dwie pary wpisów cron**, godzinę po sobie, w każdym workflow | Cron w UTC nie przesuwa się z DST. Który wpis jest właściwy, rozstrzyga kalendarz w kodzie, nie YAML |
+| Niewłaściwy przebieg z pary | `scan --window skip`: kończy się **zielono**, nie robiąc nic | Czerwony przebieg co drugi dzień przez pół roku uczy ignorowania czerwonych przebiegów |
+| Święta NYSE | Ten sam mechanizm okna je łapie | Cron nie zna kalendarza giełdy i odpali się 4 lipca |
+| `settle` a DST | Oba przebiegi wykonują się w całości | Rozliczenie jest idempotentne: wcześniejszy przebieg zapisze niekompletny wynik, późniejszy go poprawi |
+| Domyślna data `settle` | Poprzednik ostatniej **zamkniętej sesji**, nie „dziś" | Cron rozliczenia chodzi dzień po skanie. Inaczej arytmetyka dat wjechałaby do YAML-a i pomyliła się na pierwszym święcie i pierwszej sobocie |
+| Równoległość | Wspólna grupa `concurrency: emscan-database` w obu workflow | Binarnego SQLite nie da się scalić — równoległy commit to utrata danych, nie konflikt do rozwiązania |
+| Kiedy commitować | Tylko gdy `git diff` na bazie pokazuje zmianę | Pominięcie poza oknem i sesja bez zdarzeń to poprawne wyniki, nie powód do pustego commita |
+| Push | `git pull --rebase --autostash` + 4 próby z narastającym odstępem | Drugi workflow mógł commitować w międzyczasie |
+| Pliki WAL | `data/emscan.db-wal` i `-shm` do `.gitignore` | Transientne i niespójne bez bazy. Sama baza jest kompletna, bo SQLite checkpointuje WAL przy zamknięciu połączenia |
+| `--window` w CLI | Dodane poza listą flag ze SPEC §1.7 | SPEC §1.8 wymaga asercji okna wprost, a workflow woła CLI — asercja musi być tam, gdzie da się ją wywołać |
+
 ## Start następnej sesji
 
-Otwarte zostają dwie rzeczy z poprzednich kroków, obie wymagające **twojej decyzji albo
-uruchomienia**, nie kodu:
+Otwarte zostają trzy rzeczy, wszystkie wymagające **Ciebie**, nie kodu:
 
-1. **Skan na żywo w oknie 15:30 ET** — bramka kroku 5. Kod gotowy, sprawdzony na prawdziwych
-   odpowiedziach API. Po skanie: `settle` następnego dnia po 17:00 ET i `report`.
-2. **Próg `oi_atm >= 100`** — odrzuca ADI i KEYS, spółki po 100 mld USD (kwestia otwarta wyżej).
+1. **Skan na żywo w oknie 15:30 ET** — bramka kroku 5. Teraz można też przez
+   `workflow_dispatch` na zakładce Actions, z `window: require`, żeby dostać twardy błąd,
+   jeśli okno nie zgadza się z oczekiwaniem.
+2. **Sekret `EMSCAN_FINNHUB_API_KEY`** w ustawieniach repo. Bez niego skan działa, ale porę
+   publikacji zna jedno źródło i `timing_confidence` nie przekroczy MEDIUM.
+3. **Próg `oi_atm >= 100`** — odrzuca ADI i KEYS (kwestia otwarta wyżej).
 
-Następny krok kodu to **7 — GitHub Actions**. Do zrobienia:
+Następny krok kodu to **8 — `backfill` 2 lata wstecz**. To zbiór treningowy fazy 2, więc
+najdroższy krok fazy 1 pod względem liczby zapytań. Do zrobienia:
 
-1. `.github/workflows/scan.yml` — `cron: "30 19 * * 1-5"` (15:30 ET), `workflow_dispatch`
-2. `.github/workflows/settle.yml` — `cron: "0 21 * * 2-6"` (17:00 ET)
-3. **Asercja okna sesji w ET** — SPEC §1.8 wymaga jej wprost, bo cron w UTC nie przesuwa się
-   z DST i od listopada do marca te same wpisy odpalą się o godzinę wcześniej lokalnie.
-   `trading_calendar.is_in_session()` już to potrafi sprawdzić, brakuje twardego wyjścia z błędem
-4. Sekret `EMSCAN_FINNHUB_API_KEY` z GitHub Secrets
-5. Commit `data/emscan.db` i `reports/` z powrotem do repo — **tu wraca decyzja z sesji 1**:
-   czy bazę commitujemy, czy trzymamy jako artifact. Baza rośnie z każdym skanem, a commit
-   binarki do gita jest nieodwracalny w historii. Bez rozstrzygnięcia tego nie da się napisać
-   końcówki workflow
+1. Komenda `backfill --from --to` — kalendarz dzień po dniu (2 zapytania na dzień × ~500 sesji)
+   plus historia cen na ticker
+2. **Polityka scalania duplikatów daty** — `find_adjacent_date_conflicts()` je wykrywa od
+   kroku 3, ale niczego nie scala. W fazie 1 nie bolało, bo te zdarzenia i tak są niescanowalne;
+   w fazie 2 duplikat zawyży statystyki historyczne spółki. To trzeba rozstrzygnąć **przed**
+   backfillem, inaczej zbiór treningowy powstanie z błędem
+3. Rozliczenia historyczne bez EM: `outcomes` z `em_ratio`, `vrp` i `exceeded_em` równymi NULL —
+   target fazy 2 to `abs_move_pct`, który liczy się bez opcji (SPEC §2.1)
+4. Odporność na przerwanie: backfill musi dać się wznowić, bo 500 sesji × 2 zapytania to
+   godziny pracy. Wznawianie po `event_date` już obecnym w bazie
+5. Rozważyć, czy backfill ma własny workflow, czy zostaje komendą uruchamianą ręcznie
 
 Kontekst do wskazania modelowi w nowej sesji: `docs/SPEC.md`, `docs/PLAN-faza-1.md`,
 `docs/METHODOLOGY.md`. Nie każ czytać całego repo.
 
 ### Co już stoi i czego nie trzeba pisać od nowa
 
-- `trading_calendar.py` — sesje NYSE regułami, godziny sesji (`is_in_session`), dowolny rok
-- `sources/base.py` — interfejsy trzech rodzajów źródeł, typy `OptionQuote`, `OptionChain`,
-  `DailyBar`; `close()` oraz opcjonalne `data_timestamp()` i `underlying_volume()`
+- `trading_calendar.py` — sesje NYSE regułami, godziny sesji, **okno skanu** (`is_in_scan_window`)
+- `sources/base.py` — interfejsy trzech rodzajów źródeł, `close()`, opcjonalne
+  `data_timestamp()` i `underlying_volume()`
 - `sources/http.py` — timeout, retry z backoffem, rate limit, cache surowych odpowiedzi
 - `sources/cboe.py` — łańcuch, spot, wolumen i znacznik czasu z jednej odpowiedzi
-- `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz, ceny **skorygowane o splity**
-- `engine/events.py` — scalanie kalendarzy, `timing_confidence`, `session_date_for`,
-  `baseline_date_for`
+- `sources/nasdaq.py`, `sources/finnhub.py` — kalendarz z dwóch źródeł
+- `sources/nasdaq_prices.py` — świece dzienne, 2 lata wstecz, ceny skorygowane o splity
+- `engine/events.py` — scalanie, `timing_confidence`, `session_date_for`, `baseline_date_for`,
+  `find_adjacent_date_conflicts` (czeka na politykę scalania — patrz krok 8)
 - `engine/expected_move.py` — trzy metody EM, pięć flag jakości
 - `engine/universe.py` — progi filtrów, `RejectReason`, kaskada
-- `engine/scan.py` — `run_scan`, `target_session`, `ScanResult` z licznikami i powodami odrzuceń
-- `engine/outcomes.py` — `compute_outcome`, `run_settle`, `MissingOutcome`, próg podejrzliwości
-- `reporting/report.py` — md, csv, html; kolumny rozliczeniowe wypełniane po `settle`
+- `engine/scan.py` — `run_scan`, `target_session`, `ScanResult`
+- `engine/outcomes.py` — `compute_outcome`, `run_settle`, `default_settle_scan_date`
+- `reporting/report.py` — md, csv, html
 - `__main__.py` — CLI: `scan`, `settle`, `report`
-- `db.py` — pełne operacje na trzech tabelach
+- `db.py` — pełne operacje na trzech tabelach, baza w pamięci pod `--dry-run` i testy
+- `.github/workflows/` — `ci.yml`, `scan.yml`, `settle.yml`
 - `tests/fakes.py` — atrapy trzech źródeł, każda umie udawać awarię
-- `scripts/make_fixtures.py` — przycinanie surowych odpowiedzi do fixtures
 
-Czego **nie** ma: `engine/universe.py` nie liczy bety ani ADV z SPEC §2.3 (to faza 2),
-`features/`, `ml/` i `llm/` są puste, `stats` i `backfill` nie istnieją.
+Czego **nie** ma: `stats`, `backfill`, `features/`, `ml/`, `llm/`.
 
 ## Krok 1–2 — co dokładnie powstaje w tej sesji
 

@@ -222,3 +222,47 @@ def test_report_fills_the_settlement_columns(workspace: Path) -> None:
     cells = [cell.strip() for cell in row.strip("|").split("|")]
     assert cells[9:12] == ["6.00%", "UP", "0.71"]
     assert "Rozliczonych zdarzeń: 1" in text
+
+
+# ------------------------------------------------------------------ okno sesji (SPEC §1.8)
+
+OUTSIDE_WINDOW = datetime(2026, 8, 18, 7, 17, tzinfo=ET)  # rano, sesja jeszcze nie ruszyła
+HOLIDAY_WINDOW = datetime(2026, 7, 3, 15, 30, tzinfo=ET)  # obchodzony Dzień Niepodległości
+
+
+def test_window_skip_exits_green_outside_the_window(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cron ma dwa wpisy czasowe na DST — ten niewłaściwy musi kończyć się zielono."""
+    monkeypatch.setattr("emscan.__main__._now", lambda: OUTSIDE_WINDOW)
+    result = runner.invoke(app, ["scan", "--date", SCAN_DAY.isoformat(), "--window", "skip"])
+    assert result.exit_code == 0
+    assert "pomijam skan" in result.stdout
+
+
+def test_window_require_fails_outside_the_window(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("emscan.__main__._now", lambda: OUTSIDE_WINDOW)
+    result = runner.invoke(app, ["scan", "--date", SCAN_DAY.isoformat(), "--window", "require"])
+    assert result.exit_code == 1
+    assert "poza oknem skanu" in result.stderr
+
+
+def test_holiday_is_outside_the_window_even_at_the_right_hour(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cron nie zna kalendarza NYSE i odpali się w święto — asercja to wyłapuje."""
+    monkeypatch.setattr("emscan.__main__._now", lambda: HOLIDAY_WINDOW)
+    result = runner.invoke(app, ["scan", "--window", "skip"])
+    assert result.exit_code == 0
+    assert "pomijam skan" in result.stdout
+
+
+def test_window_gate_does_not_touch_the_database(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pominięcie następuje przed otwarciem bazy i przed pierwszym zapytaniem do źródeł."""
+    monkeypatch.setattr("emscan.__main__._now", lambda: OUTSIDE_WINDOW)
+    runner.invoke(app, ["scan", "--window", "skip"])
+    assert not (workspace / "emscan.db").exists()

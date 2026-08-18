@@ -1,0 +1,97 @@
+name: Scan
+
+# SPEC §1.8. Dwa wpisy cron na jedną porę lokalną, bo cron w UTC NIE przesuwa się z DST:
+# 19:30 UTC to 15:30 ET w czasie letnim, a 20:30 UTC — w zimowym. Oba się odpalą, a o tym,
+# który jest tym właściwym, rozstrzyga `--window skip`: niewłaściwy kończy się zielono,
+# nie robiąc nic. Ten sam mechanizm łapie święta NYSE, których cron nie zna.
+on:
+  schedule:
+    - cron: "30 19 * * 1-5" # 15:30 ET w czasie letnim (EDT)
+    - cron: "30 20 * * 1-5" # 15:30 ET w czasie zimowym (EST)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Dzień skanu (ISO). Puste = dziś w ET."
+        required: false
+      window:
+        description: "Polityka okna sesji"
+        required: false
+        default: skip
+        type: choice
+        options: [skip, require, ignore]
+
+permissions:
+  contents: write
+
+# Skan i rozliczenie commitują tę samą bazę, więc nie mogą chodzić równolegle:
+# binarnego SQLite nie da się scalić, konflikt kończyłby się utratą danych.
+concurrency:
+  group: emscan-database
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Skan
+        env:
+          EMSCAN_FINNHUB_API_KEY: ${{ secrets.EMSCAN_FINNHUB_API_KEY }}
+        run: |
+          uv run python -m emscan --json-logs scan \
+            --window "${{ inputs.window || 'skip' }}" \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
+
+      - name: Czy baza się zmieniła?
+        id: changed
+        run: |
+          # Brak zmian znaczy albo pominięcie poza oknem, albo brak zdarzeń tej sesji.
+          # Jedno i drugie jest poprawnym wynikiem, więc nie jest błędem.
+          if git diff --quiet -- data/emscan.db; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "baza bez zmian — pomijam raport i commit"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Raport
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          uv run python -m emscan --json-logs report \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }} --format md
+
+      - name: Commit bazy i raportu
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/emscan.db reports
+          git commit -m "Skan $(date -u +%Y-%m-%d): snapshoty EM i raport"
+          # Rebase przed pushem: rozliczenie mogło commitować w międzyczasie.
+          for attempt in 1 2 3 4; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep $((2 ** attempt))
+          done
+          exit 1
+
+      - name: Raport jako artifact
+        if: steps.changed.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ github.run_id }}
+          path: reports/
+          retention-days: 90

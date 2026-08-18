@@ -1,0 +1,84 @@
+name: Settle
+
+# SPEC §1.8. Jak w scan.yml: dwa wpisy cron na jedną porę lokalną (17:00 ET), bo cron w UTC
+# nie zna DST. Tu jednak oba przebiegi wolno wykonać w całości — rozliczenie jest idempotentne
+# (`UNIQUE(event_id)` + upsert), więc wcześniejszy przebieg co najwyżej zapisze niekompletny
+# wynik, a późniejszy go poprawi. Dnia skanu nie liczymy w YAML-u: `settle` bez `--date` sam
+# bierze poprzednika ostatniej zamkniętej sesji, po kalendarzu giełdowym.
+on:
+  schedule:
+    - cron: "0 21 * * 2-6" # 17:00 ET w czasie letnim (EDT)
+    - cron: "0 22 * * 2-6" # 17:00 ET w czasie zimowym (EST)
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Dzień skanu (ISO). Puste = poprzednik ostatniej zamkniętej sesji."
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: emscan-database
+  cancel-in-progress: false
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Rozliczenie
+        run: |
+          uv run python -m emscan --json-logs settle \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
+
+      - name: Czy baza się zmieniła?
+        id: changed
+        run: |
+          if git diff --quiet -- data/emscan.db; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "brak rozliczeń do zapisania"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Raport z rozliczeniem
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          uv run python -m emscan --json-logs report \
+            ${{ inputs.date && format('--date {0}', inputs.date) || '' }} --format md
+
+      - name: Commit bazy i raportu
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/emscan.db reports
+          git commit -m "Rozliczenie $(date -u +%Y-%m-%d): ruch faktyczny i em_ratio"
+          for attempt in 1 2 3 4; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && \
+              git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep $((2 ** attempt))
+          done
+          exit 1
+
+      - name: Raport jako artifact
+        if: steps.changed.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: settled-${{ github.run_id }}
+          path: reports/
+          retention-days: 90

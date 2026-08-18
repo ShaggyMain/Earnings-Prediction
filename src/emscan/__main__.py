@@ -18,6 +18,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -31,7 +32,7 @@ from emscan.db import (
     open_memory_db,
     outcomes_for_session,
 )
-from emscan.engine.outcomes import SettleResult, run_settle
+from emscan.engine.outcomes import SettleResult, default_settle_scan_date, run_settle
 from emscan.engine.scan import ScanResult, run_scan, target_session
 from emscan.engine.universe import UniverseFilters
 from emscan.log import configure_logging, get_logger
@@ -47,6 +48,7 @@ from emscan.sources.cboe import CboeOptionsSource
 from emscan.sources.finnhub import FinnhubCalendarSource
 from emscan.sources.nasdaq import NasdaqCalendarSource
 from emscan.sources.nasdaq_prices import NasdaqPriceSource
+from emscan.trading_calendar import is_in_scan_window
 
 ET = ZoneInfo("America/New_York")
 
@@ -58,16 +60,36 @@ app = typer.Typer(
     help="Earnings Expected Move Scanner — narzędzie badawcze, nie system tradingowy.",
 )
 
+
+class WindowPolicy(StrEnum):
+    """Co zrobić, gdy skan wypada poza oknem sesji — asercja ze SPEC §1.8.
+
+    Trzy zachowania, bo trzy różne konteksty. Cron potrzebuje `skip`: workflow ma dwa wpisy
+    czasowe na DST i ten niewłaściwy musi zakończyć się zielono, a nie czerwono. Człowiek
+    weryfikujący konfigurację potrzebuje `require`, czyli twardego błędu. Test i przebieg
+    na próbę potrzebują `ignore`.
+    """
+
+    IGNORE = "ignore"
+    SKIP = "skip"
+    REQUIRE = "require"
+
+
 DateOption = Annotated[
     str | None,
     typer.Option("--date", help="Dzień skanu w formacie ISO. Domyślnie dziś w strefie ET."),
 ]
 
 
+def _now() -> datetime:
+    """Teraz, w czasie nowojorskim. Wydzielone, żeby test mógł podstawić moment w oknie sesji."""
+    return datetime.now(tz=ET)
+
+
 def _parse_day(value: str | None) -> date:
     """Data ISO albo dzisiejsza data **nowojorska** — nigdy lokalna data maszyny."""
     if value is None:
-        return datetime.now(tz=ET).date()
+        return _now().date()
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
@@ -240,6 +262,10 @@ def scan(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Pełny przepływ, baza w pamięci — nic nie zostaje")
     ] = False,
+    window: Annotated[
+        WindowPolicy,
+        typer.Option("--window", help="Poza oknem sesji: ignore, skip (cron) albo require"),
+    ] = WindowPolicy.IGNORE,
 ) -> None:
     """Skan dnia: kalendarz obu grup, EM z łańcucha opcji, zapis snapshotów.
 
@@ -248,6 +274,18 @@ def scan(
     """
     settings = get_settings()
     scan_date = _parse_day(day)
+    snapshot_at = _now()
+
+    if window != WindowPolicy.IGNORE and not is_in_scan_window(snapshot_at):
+        message = (
+            f"{snapshot_at.strftime('%Y-%m-%d %H:%M %Z')} jest poza oknem skanu "
+            "(15:00-16:00 ET w dniu sesji)"
+        )
+        if window == WindowPolicy.REQUIRE:
+            typer.echo(f"błąd: {message}", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"pomijam skan: {message}")
+        return
 
     filters = UniverseFilters.from_settings(settings)
     if min_em is not None:
@@ -260,7 +298,6 @@ def scan(
         filters = replace(filters, min_oi_atm=min_oi)
 
     raw_dir = settings.resolved_raw_dir() / scan_date.isoformat()
-    snapshot_at = datetime.now(tz=ET)
 
     with (
         _database(settings, dry_run=dry_run) as conn,
@@ -284,15 +321,26 @@ def scan(
 
 
 @app.command()
-def settle(day: DateOption = None) -> None:
+def settle(
+    day: Annotated[
+        str | None,
+        typer.Option(
+            "--date",
+            help="Dzień skanu w ISO. Domyślnie poprzednik ostatniej zamkniętej sesji.",
+        ),
+    ] = None,
+) -> None:
     """Rozliczenie sesji następującej po dniu skanu — SPEC §1.6.
 
     Pyta o ceny tylko te tickery, dla których jest snapshot EM: `settle` domyka pętlę
     EM -> realizacja, a ruchy całego uniwersum zbierze `backfill`. Uruchomienie przed
     zamknięciem sesji nie psuje danych — kolejny przebieg nadpisze rozliczenie.
+
+    Domyślna data **nie** jest dzisiejsza: rozliczenie chodzi dzień po skanie, więc „dziś"
+    wskazywałoby sesję, która się jeszcze nie odbyła.
     """
     settings = get_settings()
-    scan_date = _parse_day(day)
+    scan_date = _parse_day(day) if day is not None else default_settle_scan_date(_now())
     raw_dir = settings.resolved_raw_dir() / scan_date.isoformat()
 
     prices = NasdaqPriceSource(
@@ -307,7 +355,7 @@ def settle(day: DateOption = None) -> None:
                 scan_date=scan_date,
                 conn=conn,
                 prices=prices,
-                settled_at=datetime.now(tz=ET),
+                settled_at=_now(),
             )
     finally:
         prices.close()
@@ -360,7 +408,7 @@ def report(
     text = render(
         rows,
         session_date=session_date,
-        generated_at=datetime.now(tz=ET),
+        generated_at=_now(),
         fmt=fmt,
         notes=notes,
     )

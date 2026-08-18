@@ -22,7 +22,9 @@ from emscan.db import (
 from emscan.engine.outcomes import (
     MissingOutcome,
     compute_outcome,
+    default_settle_scan_date,
     direction_of,
+    last_closed_session,
     run_settle,
 )
 from emscan.models import (
@@ -388,3 +390,41 @@ def test_exceeded_em_is_counted(conn: sqlite3.Connection) -> None:
         settled_at=SETTLED_AT,
     )
     assert result.exceeded_em == 1
+
+
+# ------------------------------------------------------------------ domyślna data rozliczenia
+
+
+def et(year: int, month: int, day: int, hour: int = 17) -> datetime:
+    return datetime(year, month, day, hour, 0, tzinfo=ET)
+
+
+@pytest.mark.parametrize(
+    ("moment", "session", "scan"),
+    [
+        # Wtorek 17:00 ET: sesja wtorkowa zamknęła się godzinę temu, skanował ją poniedziałek.
+        (et(2026, 8, 18), date(2026, 8, 18), date(2026, 8, 17)),
+        # Sobotni cron (SPEC §1.8 ma 2-6) rozlicza piątek, którego skan był w czwartek.
+        (et(2026, 8, 22), date(2026, 8, 21), date(2026, 8, 20)),
+        # Poniedziałek Labor Day: nie ma sesji, cofamy się do piątku i jego skanu z czwartku.
+        (et(2026, 9, 7), date(2026, 9, 4), date(2026, 9, 3)),
+        # Wtorek po Labor Day: sesja wtorkowa, ale poprzednia sesja to piątek.
+        (et(2026, 9, 8), date(2026, 9, 8), date(2026, 9, 4)),
+    ],
+)
+def test_default_settle_date_follows_the_exchange_calendar(
+    moment: datetime, session: date, scan: date
+) -> None:
+    """Bez tego arytmetyka dat wjechałaby do YAML-a i pomyliła się na pierwszym święcie."""
+    assert last_closed_session(moment) == session
+    assert default_settle_scan_date(moment) == scan
+
+
+def test_default_settle_date_is_not_today() -> None:
+    """„Dziś" wskazywałoby sesję, która się jeszcze nie odbyła — cron chodzi dzień po skanie."""
+    assert default_settle_scan_date(et(2026, 8, 18)) != date(2026, 8, 18)
+
+
+def test_naive_moment_is_rejected() -> None:
+    with pytest.raises(ValueError, match="strefą"):
+        last_closed_session(datetime(2026, 8, 18, 17, 0))  # noqa: DTZ001

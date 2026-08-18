@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from emscan.trading_calendar import (
     easter_sunday,
+    is_in_scan_window,
+    is_in_session,
     is_trading_day,
     next_trading_day,
     nyse_holidays,
@@ -105,3 +108,71 @@ def test_holidays_are_computed_for_any_year() -> None:
     """Reguły, nie zaszyta lista — backfill sięga lat, których nikt nie wpisywał ręcznie."""
     assert date(2019, 12, 25) in nyse_holidays(2019)
     assert date(2031, 12, 25) in nyse_holidays(2031)
+
+
+# ------------------------------------------------------------------ godziny sesji
+
+
+ET = ZoneInfo("America/New_York")
+UTC_TZ = ZoneInfo("UTC")
+
+
+def et(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=ET)
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        (et(2026, 8, 18, 9, 30), True),
+        (et(2026, 8, 18, 12, 0), True),
+        (et(2026, 8, 18, 16, 0), True),
+        (et(2026, 8, 18, 9, 29), False),
+        (et(2026, 8, 18, 16, 1), False),
+        (et(2026, 8, 15, 12, 0), False),  # sobota
+        (et(2026, 7, 3, 12, 0), False),  # obchodzony Dzień Niepodległości
+    ],
+)
+def test_is_in_session(moment: datetime, expected: bool) -> None:
+    assert is_in_session(moment) is expected
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        (et(2026, 8, 18, 15, 30), True),
+        (et(2026, 8, 18, 15, 0), True),
+        (et(2026, 8, 18, 16, 0), True),
+        (et(2026, 8, 18, 14, 59), False),
+        (et(2026, 8, 18, 16, 1), False),
+        (et(2026, 8, 15, 15, 30), False),  # sobota
+        (et(2026, 7, 3, 15, 30), False),  # święto
+    ],
+)
+def test_is_in_scan_window(moment: datetime, expected: bool) -> None:
+    assert is_in_scan_window(moment) is expected
+
+
+def test_summer_cron_hits_the_window_and_winter_cron_misses_it() -> None:
+    """To jest cała asercja ze SPEC §1.8: cron w UTC nie przesuwa się z DST.
+
+    Wpis `30 19 * * 1-5` to 15:30 ET w sierpniu i 14:30 ET w styczniu. Drugi wpis, godzinę
+    później, jest tym właściwym w czasie zimowym — a o tym, który z nich liczy się dzisiaj,
+    rozstrzyga `is_in_scan_window`, nie kalendarz w cronie.
+    """
+    summer = datetime(2026, 8, 18, 19, 30, tzinfo=UTC_TZ)
+    winter_early = datetime(2027, 1, 19, 19, 30, tzinfo=UTC_TZ)
+    winter_late = datetime(2027, 1, 19, 20, 30, tzinfo=UTC_TZ)
+
+    assert is_in_scan_window(summer) is True
+    assert is_in_scan_window(winter_early) is False
+    assert is_in_scan_window(winter_late) is True
+    # Ten sam wpis cron dałby w sierpniu godzinę po zamknięciu sesji.
+    assert is_in_scan_window(datetime(2026, 8, 18, 20, 30, tzinfo=UTC_TZ)) is False
+
+
+@pytest.mark.parametrize("check", [is_in_session, is_in_scan_window])
+def test_naive_timestamp_is_rejected(check: object) -> None:
+    """SPEC §1.7: naiwny znacznik porównany z godzinami ET myli się o kilka godzin."""
+    with pytest.raises(ValueError, match="strefą"):
+        check(datetime(2026, 8, 18, 15, 30))  # type: ignore[operator]  # noqa: DTZ001

@@ -20,6 +20,15 @@ ET = ZoneInfo("America/New_York")
 
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
+
+SCAN_WINDOW_START = time(15, 0)
+SCAN_WINDOW_END = time(16, 0)
+"""Okno, w którym skan ma sens: ostatnia godzina sesji (SPEC §1.8 celuje w 15:30 ET).
+
+Godzina zapasu, a nie kwadrans, bo cron w GitHub Actions bywa opóźniony o kilkanaście minut.
+Opóźnienie przekraczające okno oznacza pominięcie skanu — kwotowania po zamknięciu byłyby
+nieodświeżone, a fałszywy snapshot jest gorszy od braku snapshotu.
+"""
 """Zwykłe godziny sesji NYSE w czasie nowojorskim.
 
 Skrócone sesje (wigilia, dzień po Święcie Dziękczynienia — zamknięcie 13:00) nie są tu
@@ -159,3 +168,24 @@ def is_in_session(moment: datetime) -> bool:
     if not is_trading_day(local.date()):
         return False
     return MARKET_OPEN <= local.time() <= MARKET_CLOSE
+
+
+def is_in_scan_window(moment: datetime) -> bool:
+    """Czy moment wypada w oknie skanu — asercja wymagana przez SPEC §1.8.
+
+    Cron w UTC **nie przesuwa się z DST**: ten sam wpis `30 19 * * 1-5` to 15:30 ET w czasie
+    letnim i 14:30 ET w zimowym. Dlatego workflow ma dwa wpisy cron, po jednym na każdą porę
+    roku, a o tym, który z nich jest tym właściwym, rozstrzyga ta funkcja. Ten drugi kończy
+    się pominięciem, nie błędem.
+
+    Święto wypada z okna automatycznie: cron odpali się i tak, bo nie zna kalendarza NYSE.
+
+    Raises:
+        ValueError: moment bez strefy czasowej.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("is_in_scan_window wymaga znacznika ze strefą — patrz SPEC §1.7")
+    local = moment.astimezone(ET)
+    if not is_trading_day(local.date()):
+        return False
+    return SCAN_WINDOW_START <= local.time() <= SCAN_WINDOW_END

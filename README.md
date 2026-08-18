@@ -74,6 +74,24 @@ python scripts/probe_sources.py          # diagnostyka: czy źródła dziś odpo
 
 `stats` i `backfill` powstają w kroku 8 — atrap dla nich nie ma.
 
+## Automatyzacja
+
+Dwa workflow'y w `.github/workflows/`: `scan.yml` o 15:30 ET w dni sesyjne i `settle.yml`
+o 17:00 ET dzień później. Oba mają `workflow_dispatch`, więc pominięty dzień można nadrobić ręcznie.
+
+**Cron w UTC nie przesuwa się z DST**, dlatego każdy workflow ma **dwa** wpisy czasowe godzinę
+po sobie — jeden trafia w porę letnią, drugi w zimową. O tym, który jest tym właściwym,
+rozstrzyga kalendarz w kodzie (`--window skip`), nie YAML: niewłaściwy przebieg kończy się
+zielono, nie robiąc nic. Ten sam mechanizm łapie święta NYSE, o których cron nie wie.
+
+Oba workflow'y commitują `data/emscan.db` i `reports/` z powrotem do repo (SPEC §1.8) i dzielą
+jedną grupę `concurrency`, bo binarnego SQLite nie da się scalić — równoległy commit oznaczałby
+utratę danych. Koszt trzymania bazy w gicie zmierzony: **283 kB na sesję, ~5 MB historii na rok**,
+bo git dobrze deltuje przyrastający plik SQLite.
+
+Jedyny sekret, jakiego potrzeba, to `EMSCAN_FINNHUB_API_KEY` — łańcuch opcji i ceny nie wymagają
+klucza.
+
 `settle` liczy ruch od zamknięcia ostatniej sesji przed publikacją do zamknięcia sesji
 rozliczeniowej i zapisuje **oba** pomiary: lukę otwarcia i close-to-close. Przy AMC rynek często
 odwraca ruch z otwarcia, więc sam gap myli. Rozliczane są zdarzenia, dla których jest snapshot EM;

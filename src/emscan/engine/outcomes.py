@@ -40,6 +40,7 @@ from emscan.engine.scan import target_session
 from emscan.log import get_logger
 from emscan.models import Direction, EarningsEvent, Outcome
 from emscan.sources.base import DailyBar, PriceSource, SourceError
+from emscan.trading_calendar import ET, is_trading_day, previous_trading_day
 
 log = get_logger(__name__)
 
@@ -108,6 +109,34 @@ class SettleResult:
     def exceeded_em(self) -> int:
         """Ile ruchów przebiło EM. Rynek zwykle przeszacowuje — patrz README §Ograniczenia."""
         return sum(1 for row in self.settled if row.outcome and row.outcome.exceeded_em)
+
+
+def last_closed_session(moment: datetime) -> date:
+    """Ostatnia sesja, która się już zamknęła w chwili `moment`.
+
+    Dzień handlowy jest tą sesją — `settle` uruchamiany o 17:00 ET rozlicza sesję zamkniętą
+    godzinę wcześniej. W weekend i w święto cofamy się do poprzedniej sesji.
+
+    Raises:
+        ValueError: moment bez strefy czasowej.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("last_closed_session wymaga znacznika ze strefą — patrz SPEC §1.7")
+    day = moment.astimezone(ET).date()
+    return day if is_trading_day(day) else previous_trading_day(day)
+
+
+def default_settle_scan_date(moment: datetime) -> date:
+    """Dzień skanu, którego rozliczenie ma sens o tej porze — domyślna wartość `settle --date`.
+
+    Cron rozliczenia (SPEC §1.8: `0 21 * * 2-6`) chodzi **dzień po** skanie, więc „dziś" byłoby
+    złą domyślną datą: wskazywałoby sesję, która jeszcze się nie odbyła. Właściwy dzień skanu to
+    poprzednik ostatniej zamkniętej sesji, liczony po kalendarzu giełdowym.
+
+    Dzięki temu arytmetyka dat nie wchodzi do YAML-a: sobotni cron sam trafia w skan z czwartku
+    (sesja piątkowa), a poniedziałkowe święto nie przesuwa niczego o jeden dzień w bok.
+    """
+    return previous_trading_day(last_closed_session(moment))
 
 
 def direction_of(close_pct: float) -> Direction:
