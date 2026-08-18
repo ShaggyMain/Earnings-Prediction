@@ -243,6 +243,20 @@ przez miesiące, więc utrata retencji oznaczałaby utratę całego dorobku.
 | Pliki WAL | `data/emscan.db-wal` i `-shm` do `.gitignore` | Transientne i niespójne bez bazy. Sama baza jest kompletna, bo SQLite checkpointuje WAL przy zamknięciu połączenia |
 | `--window` w CLI | Dodane poza listą flag ze SPEC §1.7 | SPEC §1.8 wymaga asercji okna wprost, a workflow woła CLI — asercja musi być tam, gdzie da się ją wywołać |
 
+## Nauczka z CI (2026-08-18) — sprawdzaj Actions po pushu
+
+Przebiegi CI numer 6, 7 i 8 były **czerwone**, a ja tego nie zauważyłem przez trzy kroki,
+bo lokalnie wszystko przechodziło. Dwie rzeczy do zapamiętania:
+
+1. **Po każdym pushu zajrzyj do Actions.** „Zielone lokalnie" nie jest tym samym co „zielone
+   na CI" i właśnie ta różnica ukryła błąd na trzy commity.
+2. **Nie asercjuj na tekście renderowanym przez rich.** GitHub Actions włącza kolor, lokalny
+   terminal w testach nie. Rich koloruje pomoc i przy okazji **rozbija nazwy opcji**:
+   `--dry-run` trafia do wyjścia jako `-` + `-dry` + `-run` ze znacznikami ANSI pomiędzy,
+   więc `"--dry-run" in result.stdout` jest fałszem. Testuj **zachowanie** (nieznana flaga
+   daje kod 2), a nie wydruk. `tests/test_cli.py` ma teraz autouse fixture wymuszający
+   `FORCE_COLOR`, więc warunek z CI jest warunkiem domyślnym również lokalnie.
+
 ## Start następnej sesji
 
 Otwarte zostają trzy rzeczy, wszystkie wymagające **Ciebie**, nie kodu:
