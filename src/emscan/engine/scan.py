@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from sqlite3 import Connection
 
-from emscan.db import event_id_for, insert_snapshot, upsert_events
+from emscan.db import event_id_for, insert_snapshot, upsert_bars, upsert_events
 from emscan.engine.events import merge_records
 from emscan.engine.expected_move import (
     ExpectedMoveError,
@@ -267,6 +267,10 @@ def _scan_one(
             True,
             True,
         )
+
+    # Świece i tak przeszły przez nasze ręce — zapisujemy je, żeby faza 2 nie musiała
+    # odpytywać źródła o to samo tysiące razy (SPEC §2.3 potrzebuje realized vol i ADV).
+    upsert_bars(conn, ticker, bars, fetched_at=snapshot_at)
 
     volume_20d, reason = check_volume_20d(bars, filters)
     detail = f"volume_20d={volume_20d:.0f}" if volume_20d is not None else "brak świec"

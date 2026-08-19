@@ -336,3 +336,16 @@ def test_settle_accepts_the_widened_scope(workspace: Path) -> None:
     result = runner.invoke(app, ["settle", "--date", SCAN_DAY.isoformat(), "--all-events"])
     assert result.exit_code == 0
     assert "rozliczonych: 0" in result.stdout
+
+
+def test_market_rejects_an_inverted_range(workspace: Path) -> None:
+    """Walidacja przed pierwszym zapytaniem — inaczej test poszedłby do sieci."""
+    result = runner.invoke(app, ["market", "--from", "2026-08-19", "--to", "2026-08-01"])
+    assert result.exit_code == 2
+    assert "jest po" in plain(result.stderr)
+
+
+def test_backfill_rejects_an_inverted_range(workspace: Path) -> None:
+    result = runner.invoke(app, ["backfill", "--from", "2026-08-19", "--to", "2026-08-01"])
+    assert result.exit_code == 2
+    assert "jest po" in plain(result.stderr)

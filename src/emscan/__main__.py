@@ -1,8 +1,8 @@
 """CLI — SPEC §1.7.
 
-Zaimplementowane są `scan`, `settle`, `report` i `backfill`. `stats` powstaje wraz z fazą 2 —
-celowo nie ma dla niej atrapy, bo komenda, która niczego nie robi, jest gorsza od komendy,
-której nie ma.
+Zaimplementowane są `scan`, `settle`, `report`, `backfill` i `market`. `stats` powstaje wraz
+z fazą 2 — celowo nie ma dla niej atrapy, bo komenda, która niczego nie robi, jest gorsza od
+komendy, której nie ma.
 
 **Znaczenie `--date` jest jedno we wszystkich komendach: to dzień skanu D.** Sesją, o którą
 chodzi, jest pierwsza sesja po D — tam konsumują się zarówno AMC z dnia D, jak i BMO z tej
@@ -17,7 +17,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
@@ -38,6 +38,7 @@ from emscan.engine.backfill import (
     run_backfill,
     trading_days,
 )
+from emscan.engine.market import MarketResult, run_market_update
 from emscan.engine.outcomes import SettleResult, default_settle_scan_date, run_settle
 from emscan.engine.scan import ScanResult, run_scan, target_session
 from emscan.engine.universe import UniverseFilters
@@ -53,7 +54,7 @@ from emscan.sources.base import EarningsCalendarSource, OptionsChainSource, Pric
 from emscan.sources.cboe import CboeOptionsSource
 from emscan.sources.finnhub import FinnhubCalendarSource
 from emscan.sources.nasdaq import NasdaqCalendarSource
-from emscan.sources.nasdaq_prices import NasdaqPriceSource
+from emscan.sources.nasdaq_prices import ASSET_CLASS_ETF, NasdaqPriceSource
 from emscan.trading_calendar import is_in_scan_window
 
 ET = ZoneInfo("America/New_York")
@@ -471,6 +472,90 @@ def backfill(
             source.close()
 
     _echo_backfill(result)
+
+
+MARKET_LOOKBACK_DAYS = 730
+"""Domyślny zakres `market`: dwa lata. Endpoint zwraca cały zakres jednym zapytaniem, więc
+dłuższe okno kosztuje tyle samo co krótkie, a daje historię pod realized vol."""
+
+
+def _echo_market(result: MarketResult) -> None:
+    typer.echo(
+        f"dane rynkowe {result.start.isoformat()}..{result.end.isoformat()}: "
+        f"instrumentów {len(result.instruments_fetched)} "
+        f"({', '.join(result.instruments_fetched) or 'brak'}), świec zapisanych "
+        f"{result.bars_written}"
+    )
+    for ticker, value in result.iv30_recorded.items():
+        typer.echo(f"  iv30 {ticker}: {value * 100:.2f}%")
+    for failure in result.failures:
+        typer.echo(f"  awaria: {failure}")
+
+
+@app.command()
+def market(
+    date_from: Annotated[
+        str | None, typer.Option("--from", help="Początek zakresu, ISO. Puste = dwa lata wstecz")
+    ] = None,
+    date_to: Annotated[
+        str | None, typer.Option("--to", help="Koniec zakresu, ISO. Puste = dziś")
+    ] = None,
+    no_iv: Annotated[
+        bool, typer.Option("--no-iv", help="Pomiń pomiar iv30 (o jedno zapytanie mniej)")
+    ] = False,
+) -> None:
+    """Świece instrumentów reżimu rynkowego: SPY, QQQ, IWM, VXX — plus iv30 dla SPY.
+
+    Surowce pod cechy „szerokiego rynku" ze SPEC §2.3. Cechy liczy dopiero faza 2; tutaj
+    zbieramy dane, bo ich brak jest blokadą, a nie decyzją modelową.
+
+    Cztery zapytania o ceny (endpoint oddaje cały zakres naraz) plus jedno o zmienność.
+    Indeks VIX nie jest dostępny u tego dostawcy w żadnej klasie aktywów — zamiennikiem
+    jest `iv30` SPY, mierzone w momencie uruchomienia.
+    """
+    settings = get_settings()
+    end = _parse_day(date_to) if date_to is not None else _now().date()
+    start = (
+        _parse_day(date_from)
+        if date_from is not None
+        else end - timedelta(days=MARKET_LOOKBACK_DAYS)
+    )
+    if start > end:
+        raise typer.BadParameter(f"--from ({start}) jest po --to ({end})")
+
+    prices = NasdaqPriceSource(
+        user_agent=settings.user_agent,
+        timeout=settings.http_timeout,
+        max_retries=settings.http_max_retries,
+        asset_class=ASSET_CLASS_ETF,
+        raw_dir=None,
+    )
+    options = (
+        None
+        if no_iv
+        else CboeOptionsSource(
+            user_agent=settings.user_agent,
+            timeout=settings.http_timeout,
+            max_retries=settings.http_max_retries,
+            raw_dir=None,
+        )
+    )
+    try:
+        with open_db(settings.resolved_db_path()) as conn:
+            result = run_market_update(
+                conn=conn,
+                prices=prices,
+                start=start,
+                end=end,
+                fetched_at=_now(),
+                options=options,
+            )
+    finally:
+        prices.close()
+        if options is not None:
+            options.close()
+
+    _echo_market(result)
 
 
 @app.command()

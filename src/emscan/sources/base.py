@@ -82,6 +82,13 @@ class OptionChain(BaseModel):
     calls: tuple[OptionQuote, ...]
     puts: tuple[OptionQuote, ...]
     fetched_at: datetime
+    underlying_iv30: float | None = None
+    """30-dniowa zmienność implikowana **instrumentu bazowego**, jako ułamek.
+
+    Miara reżimu zmienności niezależna od wybranego wygaśnięcia — w odróżnieniu od `iv_atm`,
+    które dotyczy konkretnego kontraktu i przy wynikach jest podbite samym zdarzeniem.
+    """
+
     underlying_bid: float | None = None
     underlying_ask: float | None = None
     """Kwotowanie **akcji**, jeśli dostawca je podaje.
@@ -158,6 +165,14 @@ class OptionsChainSource(ABC):
 
         None **nie** podnosi flagi: „nie wiemy, jak stare są dane" to nie to samo co
         „dane są stare".
+        """
+        return None
+
+    def iv30(self, ticker: str) -> float | None:
+        """30-dniowa zmienność implikowana instrumentu bazowego, jako **ułamek**.
+
+        Miara reżimu zmienności. Domyślnie None: nie każdy dostawca ją podaje, a udawanie
+        jej wartości fałszowałoby cechę fazy 2.
         """
         return None
 

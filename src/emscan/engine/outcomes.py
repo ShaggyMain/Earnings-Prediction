@@ -38,7 +38,7 @@ from datetime import date, datetime, timedelta
 from enum import StrEnum
 from sqlite3 import Connection
 
-from emscan.db import insert_outcome, settlement_candidates
+from emscan.db import insert_outcome, settlement_candidates, upsert_bars
 from emscan.engine.events import baseline_date_for
 from emscan.engine.scan import target_session
 from emscan.log import get_logger
@@ -261,6 +261,9 @@ def run_settle(
         if not bars:
             rows.append(SettleRow(event=event, missing=MissingOutcome.NO_PRICE_HISTORY))
             continue
+
+        # Zapis świec jest darmowy — właśnie je pobraliśmy (patrz db.upsert_bars).
+        upsert_bars(conn, ticker, bars, fetched_at=settled_at)
 
         baseline_bar = _bar_on(bars, baseline_date)
         if baseline_bar is None:

@@ -29,6 +29,7 @@ from emscan.models import (
     Timing,
     TimingConfidence,
 )
+from emscan.sources.base import DailyBar
 
 log = get_logger(__name__)
 
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS em_snapshots (
     put_mid          REAL,
     underlying_bid   REAL,                         -- kwotowanie AKCJI, patrz METHODOLOGY §3
     underlying_ask   REAL,
+    iv30             REAL,                         -- IV 30d instrumentu bazowego, ułamek
     straddle         REAL,
     em_abs           REAL,
     em_pct           REAL,                         -- metoda A: 0.85 * straddle
@@ -78,6 +80,24 @@ CREATE TABLE IF NOT EXISTS em_snapshots (
     quality_flags    TEXT    NOT NULL DEFAULT '[]'
 );
 
+
+-- Świece dzienne. Nie ma jej w SPEC §1.4, dodana świadomie: `settle` i `scan` pobierają
+-- historię cen tak czy tak, a bez jej zapisania faza 2 musiałaby odpytać źródło tysiące razy
+-- o dane, które już przez nas przeszły. Klucz (ticker, day) sprawia, że nakładające się okna
+-- kolejnych dni nie mnożą wierszy.
+CREATE TABLE IF NOT EXISTS daily_bars (
+    id          INTEGER PRIMARY KEY,
+    ticker      TEXT    NOT NULL,
+    day         TEXT    NOT NULL,                  -- ISO
+    open        REAL    NOT NULL,
+    high        REAL    NOT NULL,
+    low         REAL    NOT NULL,
+    close       REAL    NOT NULL,
+    volume      INTEGER NOT NULL,
+    iv30        REAL,                              -- tylko dla świec, przy których ją zmierzono
+    fetched_at  TEXT    NOT NULL,
+    UNIQUE(ticker, day)
+);
 
 CREATE TABLE IF NOT EXISTS outcomes (
     id             INTEGER PRIMARY KEY,
@@ -104,6 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON earnings_events(session_date);
 CREATE INDEX IF NOT EXISTS idx_events_event_date ON earnings_events(event_date);
 CREATE INDEX IF NOT EXISTS idx_events_conflict ON earnings_events(date_conflict);
 CREATE INDEX IF NOT EXISTS idx_snapshots_event ON em_snapshots(event_id);
+CREATE INDEX IF NOT EXISTS idx_bars_ticker_day ON daily_bars(ticker, day);
 """
 """Indeksy osobno od tabel, bo powstają **po** migracji kolumn.
 
@@ -136,6 +157,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("earnings_events", "date_conflict", "INTEGER NOT NULL DEFAULT 0"),
     ("em_snapshots", "underlying_bid", "REAL"),
     ("em_snapshots", "underlying_ask", "REAL"),
+    ("em_snapshots", "iv30", "REAL"),
 )
 """Kolumny dodane po tym, jak schemat trafił do użytku: (tabela, kolumna, definicja).
 
@@ -317,10 +339,10 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
         INSERT INTO em_snapshots
             (event_id, snapshot_at, spot, expiry, dte, atm_strike,
              call_bid, call_ask, put_bid, put_ask, call_mid, put_mid,
-             underlying_bid, underlying_ask,
+             underlying_bid, underlying_ask, iv30,
              straddle, em_abs, em_pct, em_abs_weighted, em_pct_weighted, em_pct_iv,
              iv_atm, oi_atm, volume_atm, rel_spread, quality_flags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot.event_id,
@@ -337,6 +359,7 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
             snapshot.put_mid,
             snapshot.underlying_bid,
             snapshot.underlying_ask,
+            snapshot.iv30,
             snapshot.straddle,
             snapshot.em_abs,
             snapshot.em_pct,
@@ -369,6 +392,7 @@ def _row_to_snapshot(row: sqlite3.Row) -> EmSnapshot:
         put_mid=row["put_mid"],
         underlying_bid=row["underlying_bid"],
         underlying_ask=row["underlying_ask"],
+        iv30=row["iv30"],
         straddle=row["straddle"],
         em_abs=row["em_abs"],
         em_pct=row["em_pct"],
@@ -578,3 +602,81 @@ def conflicting_events(conn: sqlite3.Connection) -> list[tuple[str, date]]:
         "ORDER BY ticker, event_date"
     )
     return [(row["ticker"], date.fromisoformat(row["event_date"])) for row in cur.fetchall()]
+
+
+# ------------------------------------------------------------------ daily_bars
+
+
+def upsert_bars(
+    conn: sqlite3.Connection,
+    ticker: str,
+    bars: Iterable[DailyBar],
+    *,
+    fetched_at: datetime,
+) -> int:
+    """Zapisuje świece, nadpisując istniejące po (ticker, day).
+
+    Nadpisanie jest zamierzone: dostawca koryguje ceny wstecz (splity — patrz METHODOLOGY §6),
+    więc świeższa wersja świecy jest tą właściwą. `iv30` nie jest tu ruszane, bo pochodzi
+    z innego źródła niż OHLC — ustawia je `record_iv30`.
+    """
+    symbol = ticker.strip().upper()
+    rows = [
+        (
+            symbol,
+            bar.day.isoformat(),
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            fetched_at.isoformat(),
+        )
+        for bar in bars
+    ]
+    if not rows:
+        return 0
+    cur = conn.executemany(
+        """
+        INSERT INTO daily_bars (ticker, day, open, high, low, close, volume, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ticker, day) DO UPDATE SET
+            open = excluded.open, high = excluded.high, low = excluded.low,
+            close = excluded.close, volume = excluded.volume, fetched_at = excluded.fetched_at
+        """,
+        rows,
+    )
+    return cur.rowcount
+
+
+def record_iv30(conn: sqlite3.Connection, ticker: str, day: date, iv30: float) -> bool:
+    """Dopisuje zmierzoną IV30 do świecy dnia, w którym ją zmierzono.
+
+    Wartość jest pomiarem z momentu pobrania, nie wielkością dzienną, więc trafia wyłącznie
+    do świecy tego dnia. Brak świecy oznacza, że sesja jeszcze się nie zamknęła — zwracamy
+    False, zamiast tworzyć świecę bez OHLC.
+    """
+    cur = conn.execute(
+        "UPDATE daily_bars SET iv30 = ? WHERE ticker = ? AND day = ?",
+        (iv30, ticker.strip().upper(), day.isoformat()),
+    )
+    return cur.rowcount > 0
+
+
+def bars_for(conn: sqlite3.Connection, ticker: str, start: date, end: date) -> list[DailyBar]:
+    """Świece z bazy w zakresie włącznie, rosnąco po dacie."""
+    cur = conn.execute(
+        "SELECT * FROM daily_bars WHERE ticker = ? AND day BETWEEN ? AND ? ORDER BY day",
+        (ticker.strip().upper(), start.isoformat(), end.isoformat()),
+    )
+    return [
+        DailyBar(
+            day=date.fromisoformat(row["day"]),
+            open=row["open"],
+            high=row["high"],
+            low=row["low"],
+            close=row["close"],
+            volume=int(row["volume"]),
+        )
+        for row in cur.fetchall()
+    ]

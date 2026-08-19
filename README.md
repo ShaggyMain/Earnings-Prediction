@@ -55,6 +55,7 @@ python -m emscan scan   --date 2026-08-18 --min-em 6 --dry-run
 python -m emscan scan   --date 2026-08-18            # zapisuje snapshoty do bazy
 python -m emscan settle --date 2026-08-18            # następnego dnia, po 17:00 ET
 python -m emscan report --date 2026-08-18 --format md
+python -m emscan market                             # SPY, QQQ, IWM, VXX + iv30 dla SPY
 ```
 
 `--date` oznacza **dzień skanu**. Raport dotyczy pierwszej sesji po nim — tam konsumują się
@@ -81,7 +82,7 @@ Trzy miejsca, w tej kolejności użyteczności:
 | Gdzie | Co zawiera | Kiedy powstaje |
 |---|---|---|
 | `reports/scan-<sesja>.md` | tabela ze SPEC §1.1 — ticker, EM trzema metodami, flagi, po rozliczeniu ruch i `em_ratio` | po każdym `scan` i `settle`; commitowany do repo |
-| `data/emscan.db` | wszystko: `earnings_events`, `em_snapshots` (każdy pomiar), `outcomes` | po każdym `scan` i `settle` |
+| `data/emscan.db` | wszystko: `earnings_events`, `em_snapshots` (każdy pomiar), `outcomes`, `daily_bars` (historia cen spółek **i** instrumentów rynkowych) | po każdym `scan`, `settle` i `market` |
 | Actions → artifacts | kopia raportu, retencja 90 dni | po każdym przebiegu workflow |
 
 Raport pokazuje domyślnie tylko zdarzenia powyżej progu EM. `report --min-em 0` pokazuje

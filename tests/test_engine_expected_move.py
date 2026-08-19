@@ -678,3 +678,15 @@ def test_missing_underlying_quote_stays_none() -> None:
     )
     assert snapshot.underlying_bid is None
     assert snapshot.underlying_ask is None
+
+
+def test_snapshot_carries_the_underlying_iv30(amat: dict[date, OptionChain]) -> None:
+    """iv30 to reżim zmienności spółki, niezależny od wybranego wygaśnięcia."""
+    snapshot = compute_expected_move(
+        amat[AMAT_NEAR],
+        event_id=EVENT_ID,
+        snapshot_at=datetime(2026, 8, 14, 15, 30, tzinfo=ET),
+    )
+    assert snapshot.iv30 == pytest.approx(0.53017)
+    # iv_atm dotyczy konkretnego kontraktu i przy wynikach jest wyższe.
+    assert snapshot.iv_atm is not None and snapshot.iv_atm > snapshot.iv30

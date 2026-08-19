@@ -61,6 +61,11 @@ a surowe `bid`/`ask` zostają obok w tym samym wierszu, więc nic nie ginie.
   `rel_spread` **nie jest** jego przybliżeniem — na próbce z 19.08 mediana spreadu opcyjnego
   wyniosła 28,6%. Bez tych dwóch kolumn nie da się uczciwie wycenić hipotezy D3
   (`docs/EVALUATION.md`).
+- **`iv30`** := 30-dniowa zmienność implikowana **instrumentu bazowego**, jako ułamek. CBOE
+  podaje ją w **procentach** (AMAT: 53.017), a `iv` pojedynczego kontraktu w ułamku (0.6753) —
+  normalizujemy do ułamka, bo dwie kolumny w różnych jednostkach to najprostszy sposób na
+  zafałszowanie cechy. `iv30` opisuje reżim zmienności spółki i w odróżnieniu od `iv_atm`
+  **nie jest** podbita samym zdarzeniem.
 - **`iv_atm`** := średnia IV obu nóg ATM, licząc tylko wartości dodatnie. CBOE zwraca `iv: 0.0`
   dla części kontraktów; użycie takiego zera dałoby EM równy zero, czyli dokładnie ciche zero,
   którego SPEC zakazuje.
@@ -282,6 +287,40 @@ daty wyników są dostępne, ale nikt tego nie potwierdził na tym konkretnym ź
 | Kapitalizacja, prognoza EPS | obecne | użyteczne jako cechy fazy 2 |
 | **`timing` (BMO/AMC)** | **pusty w 100% dla dat historycznych** | patrz niżej |
 | `eps_actual` | nigdy nieobecny, także dla dat bieżących | nie rozstrzyga ani duplikatów, ani pory |
+
+### Okno zapytania o ceny musi kończyć się dziś
+
+Zweryfikowane 2026-08-19 na endpointzie Nasdaqa: zapytanie o okno, którego `todate` leży
+w odległej przeszłości, zwraca **zero wierszy — nie błąd**.
+
+| Okno | Wynik |
+|---|---|
+| 2025-06-01 .. 2025-06-30 | 0 wierszy |
+| 2024-08-01 .. 2025-06-30 | 0 wierszy |
+| 2026-07-01 .. 2026-08-10 (9 dni temu) | 28 wierszy |
+| 2024-08-01 .. dziś | 512 wierszy |
+
+Granica leży gdzieś między dziewięcioma dniami a czternastoma miesiącami i nie jest
+udokumentowana. Konsekwencja: `NasdaqPriceSource.daily_bars` wysyła zawsze okno kończące się
+**dziś**, a przycięcie do żądanej daty robi u siebie. Bez tego rozliczenie starszej sesji albo
+backfill cen dostawałyby pustą odpowiedź, nieodróżnialną od „spółka nie była notowana" — czyli
+ciche zero, którego SPEC zakazuje.
+
+### Tabela `daily_bars` — czego nie ma w SPEC §1.4
+
+Dodana świadomie, poza schematem ze SPEC. `scan` i `settle` pobierają historię cen tak czy tak
+(45 sesji na ticker), a bez zapisania jej faza 2 musiałaby odpytać źródło tysiące razy o dane,
+które już przez nas przeszły. Klucz `(ticker, day)` sprawia, że nakładające się okna kolejnych
+dni nie mnożą wierszy — dopisuje się zwykle jedna świeca na ticker na sesję.
+
+W tej samej tabeli leżą instrumenty reżimu rynkowego (`SPY`, `QQQ`, `IWM`, `VXX`), więc faza 2
+pyta o rynek i o spółkę jednym zapytaniem. Kolumna `iv30` jest wypełniana **tylko** dla świecy
+tego dnia, w którym pomiar wykonano — to wartość z momentu pobrania, nie wielkość dzienna.
+
+Czego tam **nie** ma: indeksu VIX. Nasdaq nie udostępnia go w żadnej klasie aktywów, więc
+reżim zmienności mierzymy przez `iv30` dla SPY (18.08 wyszło 12,06%). VXX trzymamy jako materiał
+pomocniczy, ale to ETN na kontrakty terminowe, obciążony kosztem rolowania — **nie jest
+poziomem VIX** i nie wolno go tak używać.
 
 ### Brak pory publikacji w historii — problem otwarty
 
