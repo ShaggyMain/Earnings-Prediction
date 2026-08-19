@@ -6,6 +6,12 @@
 # dane surowe (cache odpowiedzi HTTP) — duże, odtwarzalne
 data/raw/
 
+# pliki towarzyszące WAL — transientne i niespójne bez bazy.
+# Sama data/emscan.db JEST commitowana (SPEC §1.8) — po zamknięciu połączenia
+# SQLite checkpointuje WAL, więc plik bazy jest kompletny.
+data/emscan.db-wal
+data/emscan.db-shm
+
 # Python
 __pycache__/
 *.py[cod]

@@ -166,6 +166,10 @@ class CboeOptionsSource(OptionsChainSource):
         data = self._payload(ticker).get("data") or {}
         return CboeQuote(data)
 
+    def underlying_volume(self, ticker: str) -> int | None:
+        """Wolumen akcji w bieżącej sesji — bez dodatkowego zapytania."""
+        return self.quote(ticker).volume
+
     def data_timestamp(self, ticker: str) -> datetime | None:
         """Znacznik czasu danych podany przez CBOE — podstawa flagi `stale_quote`.
 

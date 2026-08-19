@@ -102,6 +102,10 @@ class EarningsCalendarSource(ABC):
 
     name: str
 
+    def close(self) -> None:
+        """Zwalnia zasoby źródła (klient HTTP). Źródło bez zasobów nie musi tego nadpisywać."""
+        return None
+
     @abstractmethod
     def fetch_day(self, day: date) -> list[RawEarningsRecord]:
         """Zdarzenia z publikacją w dniu `day`.
@@ -117,6 +121,10 @@ class OptionsChainSource(ABC):
 
     name: str
 
+    def close(self) -> None:
+        """Zwalnia zasoby źródła (klient HTTP). Źródło bez zasobów nie musi tego nadpisywać."""
+        return None
+
     @abstractmethod
     def expirations(self, ticker: str) -> list[date]:
         """Dostępne daty wygaśnięcia, rosnąco."""
@@ -125,11 +133,36 @@ class OptionsChainSource(ABC):
     def chain(self, ticker: str, expiry: date) -> OptionChain:
         """Łańcuch dla konkretnego wygaśnięcia, wraz z ceną spot."""
 
+    # Poniższe dwie metody są **opcjonalne**: nie każdy dostawca je udźwignie, a oba
+    # pojęcia są od dostawcy niezależne, więc mają miejsce w interfejsie, nie w silniku.
+    # Domyślne None znaczy „nie wiadomo" i nigdy nie jest zastępowane wartością udawaną.
+
+    def data_timestamp(self, ticker: str) -> datetime | None:
+        """Jak stare są kwotowania według dostawcy — podstawa flagi `stale_quote`.
+
+        None **nie** podnosi flagi: „nie wiemy, jak stare są dane" to nie to samo co
+        „dane są stare".
+        """
+        return None
+
+    def underlying_volume(self, ticker: str) -> int | None:
+        """Wolumen instrumentu bazowego w bieżącej sesji, jeśli dostawca go podaje.
+
+        Tani filtr wstępny kaskady (SPEC §B.2). U CBOE przychodzi w tej samej odpowiedzi
+        co łańcuch, więc nie kosztuje ani jednego dodatkowego zapytania. **Nie zastępuje**
+        średniej 20-sesyjnej — służy tylko do odsiania spółek oczywiście niehandlowanych.
+        """
+        return None
+
 
 class PriceSource(ABC):
     """Ceny OHLC. Implementacja Tradiera powstaje po weryfikacji kształtu API."""
 
     name: str
+
+    def close(self) -> None:
+        """Zwalnia zasoby źródła (klient HTTP). Źródło bez zasobów nie musi tego nadpisywać."""
+        return None
 
     @abstractmethod
     def daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]:

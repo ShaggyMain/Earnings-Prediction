@@ -1,1 +1,1 @@
-"""Placeholder — zawartość powstaje w kolejnych krokach, patrz docs/PLAN-faza-1.md."""
+"""Raporty — SPEC §1.1, §1.7. Renderowanie md/csv/html w `report`."""

@@ -18,7 +18,19 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from emscan.models import EarningsEvent, RawEarningsRecord, Timing, TimingConfidence
+from emscan.log import get_logger
+from emscan.models import (
+    Direction,
+    EarningsEvent,
+    EmSnapshot,
+    Outcome,
+    QualityFlag,
+    RawEarningsRecord,
+    Timing,
+    TimingConfidence,
+)
+
+log = get_logger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS earnings_events (
@@ -32,11 +44,10 @@ CREATE TABLE IF NOT EXISTS earnings_events (
     eps_actual_present INTEGER NOT NULL DEFAULT 0,
     sources_json       TEXT    NOT NULL,
     fetched_at         TEXT    NOT NULL,
+    date_conflict      INTEGER NOT NULL DEFAULT 0,   -- patrz METHODOLOGY §7
     UNIQUE(ticker, event_date)
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_session ON earnings_events(session_date);
-CREATE INDEX IF NOT EXISTS idx_events_event_date ON earnings_events(event_date);
 
 CREATE TABLE IF NOT EXISTS em_snapshots (
     id               INTEGER PRIMARY KEY,
@@ -65,7 +76,6 @@ CREATE TABLE IF NOT EXISTS em_snapshots (
     quality_flags    TEXT    NOT NULL DEFAULT '[]'
 );
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_event ON em_snapshots(event_id);
 
 CREATE TABLE IF NOT EXISTS outcomes (
     id             INTEGER PRIMARY KEY,
@@ -87,6 +97,19 @@ CREATE TABLE IF NOT EXISTS outcomes (
 """
 
 
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_events_session ON earnings_events(session_date);
+CREATE INDEX IF NOT EXISTS idx_events_event_date ON earnings_events(event_date);
+CREATE INDEX IF NOT EXISTS idx_events_conflict ON earnings_events(date_conflict);
+CREATE INDEX IF NOT EXISTS idx_snapshots_event ON em_snapshots(event_id);
+"""
+"""Indeksy osobno od tabel, bo powstają **po** migracji kolumn.
+
+Indeks na `date_conflict` odwołuje się do kolumny, której baza z wcześniejszego skanu jeszcze
+nie ma — wykonany przed `ALTER TABLE` wywracał całe otwarcie bazy.
+"""
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """Otwiera połączenie z włączonymi kluczami obcymi i dostępem po nazwie kolumny."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,14 +121,53 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Tworzy tabele, jeśli ich nie ma. Idempotentne."""
+    """Tworzy tabele, dokłada brakujące kolumny, potem indeksy. Idempotentne.
+
+    Kolejność jest istotna: indeks na kolumnie dodanej migracją nie może powstać przed nią.
+    """
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
+    conn.executescript(INDEXES)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Dokłada kolumny dodane po tym, jak baza już powstała.
+
+    `CREATE TABLE IF NOT EXISTS` nie zmienia istniejącej tabeli, więc baza z wcześniejszego
+    skanu nie dostałaby `date_conflict` i zapytania fazy 2 wywracałyby się na jej braku.
+    Migracja jest tu, a nie w osobnym narzędziu, bo schemat jest mały i dokładanie kolumny
+    z wartością domyślną jest w SQLite operacją bez przepisywania tabeli.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")}
+    if "date_conflict" not in existing:
+        conn.execute(
+            "ALTER TABLE earnings_events ADD COLUMN date_conflict INTEGER NOT NULL DEFAULT 0"
+        )
+        log.info("migracja schematu", table="earnings_events", added="date_conflict")
 
 
 @contextmanager
 def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
     """Połączenie z gotowym schematem, zamykane po wyjściu z bloku."""
     conn = connect(db_path)
+    try:
+        init_schema(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def open_memory_db() -> Iterator[sqlite3.Connection]:
+    """Baza w pamięci — `scan --dry-run` i testy.
+
+    Dzięki temu „na próbę" znaczy dokładnie ten sam przepływ, z prawdziwymi kluczami
+    obcymi i prawdziwym `event_id`, tylko bez śladu na dysku. Alternatywa — udawany
+    identyfikator zdarzenia — wymagałaby fałszowania danych w silniku.
+    """
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         init_schema(conn)
         yield conn
@@ -205,6 +267,19 @@ def events_by_session_date(conn: sqlite3.Connection, session_date: date) -> list
     return [_row_to_event(row) for row in cur.fetchall()]
 
 
+def has_events_on(conn: sqlite3.Connection, event_date: date) -> bool:
+    """Czy w bazie jest choć jedno zdarzenie z tego dnia — podstawa wznawiania backfillu.
+
+    Dzień faktycznie pusty (święto, brak publikacji) zostanie przy wznowieniu pobrany
+    ponownie. To kilka zapytań więcej i świadomie wybrana cena za brak osobnej tabeli
+    „dni już przetworzonych".
+    """
+    cur = conn.execute(
+        "SELECT 1 FROM earnings_events WHERE event_date = ? LIMIT 1", (event_date.isoformat(),)
+    )
+    return cur.fetchone() is not None
+
+
 def event_id_for(conn: sqlite3.Connection, ticker: str, event_date: date) -> int | None:
     """Klucz główny zdarzenia albo None, gdy go nie ma."""
     cur = conn.execute(
@@ -213,3 +288,241 @@ def event_id_for(conn: sqlite3.Connection, ticker: str, event_date: date) -> int
     )
     row = cur.fetchone()
     return int(row["id"]) if row else None
+
+
+# ------------------------------------------------------------------ em_snapshots
+
+
+def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
+    """Dopisuje snapshot EM i zwraca jego identyfikator.
+
+    Tabela celowo nie ma `UNIQUE(event_id)`: snapshot jest **pomiarem w chwili**, a nie
+    stanem zdarzenia. Dwa skany tego samego dnia dają dwa wiersze i to jest wartość —
+    widać, jak EM zmieniał się w miarę zbliżania się do publikacji. Raport bierze
+    najświeższy wiersz na zdarzenie.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO em_snapshots
+            (event_id, snapshot_at, spot, expiry, dte, atm_strike,
+             call_bid, call_ask, put_bid, put_ask, call_mid, put_mid,
+             straddle, em_abs, em_pct, em_abs_weighted, em_pct_weighted, em_pct_iv,
+             iv_atm, oi_atm, volume_atm, rel_spread, quality_flags)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot.event_id,
+            snapshot.snapshot_at.isoformat(),
+            snapshot.spot,
+            snapshot.expiry.isoformat(),
+            snapshot.dte,
+            snapshot.atm_strike,
+            snapshot.call_bid,
+            snapshot.call_ask,
+            snapshot.put_bid,
+            snapshot.put_ask,
+            snapshot.call_mid,
+            snapshot.put_mid,
+            snapshot.straddle,
+            snapshot.em_abs,
+            snapshot.em_pct,
+            snapshot.em_abs_weighted,
+            snapshot.em_pct_weighted,
+            snapshot.em_pct_iv,
+            snapshot.iv_atm,
+            snapshot.oi_atm,
+            snapshot.volume_atm,
+            snapshot.rel_spread,
+            json.dumps([str(flag) for flag in snapshot.quality_flags]),
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _row_to_snapshot(row: sqlite3.Row) -> EmSnapshot:
+    return EmSnapshot(
+        event_id=int(row["event_id"]),
+        snapshot_at=datetime.fromisoformat(row["snapshot_at"]),
+        spot=row["spot"],
+        expiry=date.fromisoformat(row["expiry"]),
+        dte=int(row["dte"]),
+        atm_strike=row["atm_strike"],
+        call_bid=row["call_bid"],
+        call_ask=row["call_ask"],
+        put_bid=row["put_bid"],
+        put_ask=row["put_ask"],
+        call_mid=row["call_mid"],
+        put_mid=row["put_mid"],
+        straddle=row["straddle"],
+        em_abs=row["em_abs"],
+        em_pct=row["em_pct"],
+        em_abs_weighted=row["em_abs_weighted"],
+        em_pct_weighted=row["em_pct_weighted"],
+        em_pct_iv=row["em_pct_iv"],
+        iv_atm=row["iv_atm"],
+        oi_atm=row["oi_atm"],
+        volume_atm=row["volume_atm"],
+        rel_spread=row["rel_spread"],
+        quality_flags=[QualityFlag(flag) for flag in json.loads(row["quality_flags"])],
+    )
+
+
+def latest_snapshots_for_session(
+    conn: sqlite3.Connection, session_date: date
+) -> list[tuple[EarningsEvent, EmSnapshot]]:
+    """Najświeższy snapshot na zdarzenie, dla wszystkich zdarzeń danej sesji.
+
+    To jest grupowanie ze SPEC §1 — AMC z D-1 i BMO z D razem. Zdarzenia bez snapshotu
+    (odrzucone przez filtry albo z niepoliczalnym EM) po prostu nie mają tu pary; w tabeli
+    `earnings_events` zostają nietknięte.
+    """
+    events: dict[int, EarningsEvent] = {}
+    for row in conn.execute(
+        "SELECT * FROM earnings_events WHERE session_date = ? ORDER BY ticker",
+        (session_date.isoformat(),),
+    ):
+        events[int(row["id"])] = _row_to_event(row)
+    if not events:
+        return []
+
+    placeholders = ",".join("?" * len(events))
+    latest: dict[int, EmSnapshot] = {}
+    for row in conn.execute(
+        # Sortowanie rosnąco po snapshot_at sprawia, że ostatni wpis do słownika jest
+        # najświeższy. Liczba znaków zapytania pochodzi z długości listy, nie z danych.
+        f"SELECT * FROM em_snapshots WHERE event_id IN ({placeholders}) ORDER BY snapshot_at",
+        tuple(events),
+    ):
+        latest[int(row["event_id"])] = _row_to_snapshot(row)
+
+    return [(event, latest[event_id]) for event_id, event in events.items() if event_id in latest]
+
+
+# ------------------------------------------------------------------ outcomes
+
+
+def insert_outcome(conn: sqlite3.Connection, outcome: Outcome) -> int:
+    """Zapisuje rozliczenie, nadpisując istniejące dla tego zdarzenia.
+
+    `UNIQUE(event_id)` jest tu zamierzone, w odróżnieniu od snapshotów: rozliczenie to
+    **stan** zdarzenia, nie pomiar w chwili. Ponowny `settle` ma poprawić wynik, jeśli
+    pierwszy przebieg trafił w moment przed zamknięciem sesji.
+    """
+    cur = conn.execute(
+        """
+        INSERT INTO outcomes
+            (event_id, baseline_close, next_open, next_close, gap_pct, close_pct,
+             intraday_pct, direction, abs_move_pct, em_ratio, vrp, exceeded_em, settled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_id) DO UPDATE SET
+            baseline_close = excluded.baseline_close,
+            next_open      = excluded.next_open,
+            next_close     = excluded.next_close,
+            gap_pct        = excluded.gap_pct,
+            close_pct      = excluded.close_pct,
+            intraday_pct   = excluded.intraday_pct,
+            direction      = excluded.direction,
+            abs_move_pct   = excluded.abs_move_pct,
+            em_ratio       = excluded.em_ratio,
+            vrp            = excluded.vrp,
+            exceeded_em    = excluded.exceeded_em,
+            settled_at     = excluded.settled_at
+        """,
+        (
+            outcome.event_id,
+            outcome.baseline_close,
+            outcome.next_open,
+            outcome.next_close,
+            outcome.gap_pct,
+            outcome.close_pct,
+            outcome.intraday_pct,
+            str(outcome.direction),
+            outcome.abs_move_pct,
+            outcome.em_ratio,
+            outcome.vrp,
+            None if outcome.exceeded_em is None else int(outcome.exceeded_em),
+            outcome.settled_at.isoformat(),
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _row_to_outcome(row: sqlite3.Row) -> Outcome:
+    return Outcome(
+        event_id=int(row["event_id"]),
+        baseline_close=row["baseline_close"],
+        next_open=row["next_open"],
+        next_close=row["next_close"],
+        gap_pct=row["gap_pct"],
+        close_pct=row["close_pct"],
+        intraday_pct=row["intraday_pct"],
+        direction=Direction(row["direction"]),
+        abs_move_pct=row["abs_move_pct"],
+        em_ratio=row["em_ratio"],
+        vrp=row["vrp"],
+        exceeded_em=None if row["exceeded_em"] is None else bool(row["exceeded_em"]),
+        settled_at=datetime.fromisoformat(row["settled_at"]),
+    )
+
+
+def outcomes_for_session(conn: sqlite3.Connection, session_date: date) -> dict[int, Outcome]:
+    """Rozliczenia zdarzeń danej sesji, po `event_id` — w tej formie bierze je raport."""
+    cur = conn.execute(
+        """
+        SELECT o.* FROM outcomes o
+        JOIN earnings_events e ON e.id = o.event_id
+        WHERE e.session_date = ?
+        """,
+        (session_date.isoformat(),),
+    )
+    return {int(row["event_id"]): _row_to_outcome(row) for row in cur.fetchall()}
+
+
+# ------------------------------------------------------------------ duplikaty daty publikacji
+
+
+def mark_date_conflicts(conn: sqlite3.Connection, *, max_gap_days: int = 1) -> int:
+    """Oznacza pary „ten sam ticker w sąsiednich dniach" — METHODOLOGY §7.
+
+    Spółka nie raportuje dwa razy w odstępie doby, więc taka para to prawie na pewno **jedna**
+    publikacja opisana przez dwa źródła, które nie zgadzają się co do daty. Nie scalamy jej
+    i nie wybieramy zwycięzcy: żadna dostępna przesłanka nie rozstrzyga, która data jest
+    prawdziwa, a rozstrzyganie po cenach byłoby wnioskowaniem z tej samej zmiennej, którą
+    faza 2 ma przewidywać.
+
+    Oznaczamy **oba** wiersze pary. Faza 2 wyklucza je jednym predykatem, a rekord zostaje
+    w bazie — SPEC §1.4 zabrania usuwania rekordów o niskiej jakości.
+
+    Przebieg jest post-passem po całej tabeli, nie decyzją przy zapisie: backfill przetwarza
+    dni po kolei i wznawia się po przerwaniu, więc para może powstać z dwóch różnych runów.
+
+    Returns:
+        Liczba wierszy oznaczonych **w tym przebiegu** (flaga nie jest zerowana ponownie).
+    """
+    cur = conn.execute(
+        """
+        UPDATE earnings_events SET date_conflict = 1
+        WHERE date_conflict = 0
+          AND id IN (
+            SELECT a.id FROM earnings_events a
+            JOIN earnings_events b
+              ON b.ticker = a.ticker
+             AND b.id != a.id
+             AND ABS(JULIANDAY(b.event_date) - JULIANDAY(a.event_date)) <= ?
+          )
+        """,
+        (max_gap_days,),
+    )
+    marked = cur.rowcount
+    if marked:
+        log.warning("oznaczono duplikaty daty publikacji", rows=marked)
+    return marked
+
+
+def conflicting_events(conn: sqlite3.Connection) -> list[tuple[str, date]]:
+    """Oznaczone pary, po tickerze i dacie — do raportowania i do wykluczeń w fazie 2."""
+    cur = conn.execute(
+        "SELECT ticker, event_date FROM earnings_events WHERE date_conflict = 1 "
+        "ORDER BY ticker, event_date"
+    )
+    return [(row["ticker"], date.fromisoformat(row["event_date"])) for row in cur.fetchall()]

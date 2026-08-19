@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # --- ścieżki ---
     db_path: Path = Path("data/emscan.db")
     raw_dir: Path = Path("data/raw")
+    reports_dir: Path = Path("reports")
 
     # --- HTTP ---
     http_timeout: float = 20.0
@@ -56,6 +57,10 @@ class Settings(BaseSettings):
     def resolved_raw_dir(self) -> Path:
         """Katalog surowych odpowiedzi sprowadzony do bezwzględnego."""
         return self.raw_dir if self.raw_dir.is_absolute() else REPO_ROOT / self.raw_dir
+
+    def resolved_reports_dir(self) -> Path:
+        """Katalog raportów sprowadzony do bezwzględnego."""
+        return self.reports_dir if self.reports_dir.is_absolute() else REPO_ROOT / self.reports_dir
 
 
 @lru_cache(maxsize=1)
