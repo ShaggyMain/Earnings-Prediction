@@ -221,3 +221,30 @@ def test_unparsable_contracts_are_skipped_not_fatal(
     }
     respx.get(AMAT_URL).mock(return_value=httpx.Response(200, json=payload))
     assert source.expirations("AMAT") == [AMAT_NEAR_EXPIRY, date(2026, 8, 21)]
+
+
+# ------------------------------------------------------------------ kwotowanie akcji
+
+
+@respx.mock
+def test_chain_carries_the_underlying_quote(source: CboeOptionsSource, cboe_amat: Any) -> None:
+    """Spread akcji przychodzi w tej samej odpowiedzi co łańcuch — nie wolno go wyrzucać.
+
+    Koszt transakcji na instrumencie bazowym jest o dwa rzędy wielkości mniejszy niż spread
+    opcyjny, więc jedno nie zastępuje drugiego (patrz docs/EVALUATION.md, hipoteza D3).
+    """
+    respx.get(AMAT_URL).mock(return_value=httpx.Response(200, json=cboe_amat))
+    chain = source.chain("AMAT", AMAT_NEAR_EXPIRY)
+    assert (chain.underlying_bid, chain.underlying_ask) == (506.8, 507.0)
+    assert chain.underlying_rel_spread == pytest.approx(0.2 / 506.9, rel=1e-6)
+
+
+@respx.mock
+def test_underlying_spread_is_none_without_a_two_sided_quote(
+    source: CboeOptionsSource, cboe_amat: Any
+) -> None:
+    """Brak kwotowania to brak danych, nie spread zerowy."""
+    payload = {**cboe_amat, "data": {**cboe_amat["data"], "bid": 0, "ask": 0}}
+    respx.get(AMAT_URL).mock(return_value=httpx.Response(200, json=payload))
+    chain = source.chain("AMAT", AMAT_NEAR_EXPIRY)
+    assert chain.underlying_rel_spread is None

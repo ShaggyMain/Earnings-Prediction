@@ -121,6 +121,22 @@ def test_upsert_does_not_clear_the_flag(conn: sqlite3.Connection) -> None:
 
 
 OLD_SCHEMA = """
+CREATE TABLE em_snapshots (
+    id               INTEGER PRIMARY KEY,
+    event_id         INTEGER NOT NULL,
+    snapshot_at      TEXT    NOT NULL,
+    spot             REAL    NOT NULL,
+    expiry           TEXT    NOT NULL,
+    dte              INTEGER NOT NULL,
+    atm_strike       REAL    NOT NULL,
+    call_bid         REAL, call_ask REAL, put_bid REAL, put_ask REAL,
+    call_mid         REAL, put_mid  REAL,
+    straddle         REAL, em_abs   REAL, em_pct  REAL,
+    em_abs_weighted  REAL, em_pct_weighted REAL, em_pct_iv REAL,
+    iv_atm           REAL, oi_atm INTEGER, volume_atm INTEGER, rel_spread REAL,
+    quality_flags    TEXT    NOT NULL DEFAULT '[]'
+);
+
 CREATE TABLE earnings_events (
     id                 INTEGER PRIMARY KEY,
     ticker             TEXT    NOT NULL,
@@ -137,8 +153,12 @@ CREATE TABLE earnings_events (
 """
 
 
-def test_existing_database_gets_the_new_column(tmp_path: Path) -> None:
-    """Baza z wcześniejszego skanu nie dostałaby kolumny z `CREATE TABLE IF NOT EXISTS`."""
+def test_existing_database_gets_the_new_columns(tmp_path: Path) -> None:
+    """Baza z wcześniejszego skanu nie dostałaby kolumn z `CREATE TABLE IF NOT EXISTS`.
+
+    Sprawdzamy obie migracje naraz: flagę duplikatów w `earnings_events` i kwotowanie akcji
+    w `em_snapshots`. Ta druga jest ważna, bo baza z 19.08 istnieje już w repo.
+    """
     db_path = tmp_path / "old.db"
     legacy = sqlite3.connect(db_path)
     legacy.executescript(OLD_SCHEMA)
@@ -146,8 +166,10 @@ def test_existing_database_gets_the_new_column(tmp_path: Path) -> None:
     legacy.close()
 
     with open_db(db_path) as conn:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")}
-        assert "date_conflict" in columns
+        events_columns = {row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")}
+        snapshot_columns = {row["name"] for row in conn.execute("PRAGMA table_info(em_snapshots)")}
+        assert "date_conflict" in events_columns
+        assert {"underlying_bid", "underlying_ask"} <= snapshot_columns
         upsert_events(conn, [event("ACTU", date(2026, 8, 13)), event("ACTU", date(2026, 8, 14))])
         assert mark_date_conflicts(conn) == 2
 
@@ -157,5 +179,7 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     with open_db(db_path) as conn:
         init_schema(conn)
         init_schema(conn)
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")]
-        assert columns.count("date_conflict") == 1
+        events_columns = [row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")]
+        snapshot_columns = [row["name"] for row in conn.execute("PRAGMA table_info(em_snapshots)")]
+        assert events_columns.count("date_conflict") == 1
+        assert snapshot_columns.count("underlying_bid") == 1

@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS em_snapshots (
     put_ask          REAL,
     call_mid         REAL,
     put_mid          REAL,
+    underlying_bid   REAL,                         -- kwotowanie AKCJI, patrz METHODOLOGY §3
+    underlying_ask   REAL,
     straddle         REAL,
     em_abs           REAL,
     em_pct           REAL,                         -- metoda A: 0.85 * straddle
@@ -130,20 +132,29 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(INDEXES)
 
 
-def _add_missing_columns(conn: sqlite3.Connection) -> None:
-    """Dokłada kolumny dodane po tym, jak baza już powstała.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("earnings_events", "date_conflict", "INTEGER NOT NULL DEFAULT 0"),
+    ("em_snapshots", "underlying_bid", "REAL"),
+    ("em_snapshots", "underlying_ask", "REAL"),
+)
+"""Kolumny dodane po tym, jak schemat trafił do użytku: (tabela, kolumna, definicja).
 
-    `CREATE TABLE IF NOT EXISTS` nie zmienia istniejącej tabeli, więc baza z wcześniejszego
-    skanu nie dostałaby `date_conflict` i zapytania fazy 2 wywracałyby się na jej braku.
-    Migracja jest tu, a nie w osobnym narzędziu, bo schemat jest mały i dokładanie kolumny
-    z wartością domyślną jest w SQLite operacją bez przepisywania tabeli.
-    """
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(earnings_events)")}
-    if "date_conflict" not in existing:
-        conn.execute(
-            "ALTER TABLE earnings_events ADD COLUMN date_conflict INTEGER NOT NULL DEFAULT 0"
-        )
-        log.info("migracja schematu", table="earnings_events", added="date_conflict")
+Lista rośnie wraz ze schematem. `CREATE TABLE IF NOT EXISTS` nie zmienia istniejącej tabeli,
+więc bez tego baza z wcześniejszego skanu nie dostałaby nowych kolumn, a zapytania na nie
+liczące wywracałyby się. W SQLite dodanie kolumny z wartością domyślną nie przepisuje tabeli,
+więc migracja jest tania i może być odpalana przy każdym otwarciu bazy.
+"""
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Dokłada kolumny z `MIGRATIONS`, których w bazie jeszcze nie ma. Idempotentne."""
+    for table, column, definition in MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # tabeli nie ma — powstanie ze SCHEMA z kolumną już w środku
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            log.info("migracja schematu", table=table, added=column)
 
 
 @contextmanager
@@ -306,9 +317,10 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
         INSERT INTO em_snapshots
             (event_id, snapshot_at, spot, expiry, dte, atm_strike,
              call_bid, call_ask, put_bid, put_ask, call_mid, put_mid,
+             underlying_bid, underlying_ask,
              straddle, em_abs, em_pct, em_abs_weighted, em_pct_weighted, em_pct_iv,
              iv_atm, oi_atm, volume_atm, rel_spread, quality_flags)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot.event_id,
@@ -323,6 +335,8 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: EmSnapshot) -> int:
             snapshot.put_ask,
             snapshot.call_mid,
             snapshot.put_mid,
+            snapshot.underlying_bid,
+            snapshot.underlying_ask,
             snapshot.straddle,
             snapshot.em_abs,
             snapshot.em_pct,
@@ -353,6 +367,8 @@ def _row_to_snapshot(row: sqlite3.Row) -> EmSnapshot:
         put_ask=row["put_ask"],
         call_mid=row["call_mid"],
         put_mid=row["put_mid"],
+        underlying_bid=row["underlying_bid"],
+        underlying_ask=row["underlying_ask"],
         straddle=row["straddle"],
         em_abs=row["em_abs"],
         em_pct=row["em_pct"],
@@ -367,35 +383,71 @@ def _row_to_snapshot(row: sqlite3.Row) -> EmSnapshot:
     )
 
 
-def latest_snapshots_for_session(
+def _events_by_id_for_session(
     conn: sqlite3.Connection, session_date: date
-) -> list[tuple[EarningsEvent, EmSnapshot]]:
-    """Najświeższy snapshot na zdarzenie, dla wszystkich zdarzeń danej sesji.
+) -> dict[int, EarningsEvent]:
+    """Zdarzenia danej sesji, po kluczu głównym. To grupowanie ze SPEC §1: AMC z D-1 i BMO z D."""
+    return {
+        int(row["id"]): _row_to_event(row)
+        for row in conn.execute(
+            "SELECT * FROM earnings_events WHERE session_date = ? ORDER BY ticker",
+            (session_date.isoformat(),),
+        )
+    }
 
-    To jest grupowanie ze SPEC §1 — AMC z D-1 i BMO z D razem. Zdarzenia bez snapshotu
-    (odrzucone przez filtry albo z niepoliczalnym EM) po prostu nie mają tu pary; w tabeli
-    `earnings_events` zostają nietknięte.
-    """
-    events: dict[int, EarningsEvent] = {}
-    for row in conn.execute(
-        "SELECT * FROM earnings_events WHERE session_date = ? ORDER BY ticker",
-        (session_date.isoformat(),),
-    ):
-        events[int(row["id"])] = _row_to_event(row)
-    if not events:
-        return []
 
-    placeholders = ",".join("?" * len(events))
+def _latest_snapshots_by_event(
+    conn: sqlite3.Connection, event_ids: Iterable[int]
+) -> dict[int, EmSnapshot]:
+    """Najświeższy snapshot na zdarzenie. Jedno zapytanie, bez N+1."""
+    ids = tuple(event_ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
     latest: dict[int, EmSnapshot] = {}
     for row in conn.execute(
         # Sortowanie rosnąco po snapshot_at sprawia, że ostatni wpis do słownika jest
         # najświeższy. Liczba znaków zapytania pochodzi z długości listy, nie z danych.
         f"SELECT * FROM em_snapshots WHERE event_id IN ({placeholders}) ORDER BY snapshot_at",
-        tuple(events),
+        ids,
     ):
         latest[int(row["event_id"])] = _row_to_snapshot(row)
+    return latest
 
+
+def latest_snapshots_for_session(
+    conn: sqlite3.Connection, session_date: date
+) -> list[tuple[EarningsEvent, EmSnapshot]]:
+    """Zdarzenia danej sesji, które **mają** snapshot EM — tak czyta je raport.
+
+    Zdarzenie bez snapshotu (odrzucone przez filtry albo z niepoliczalnym EM) nie ma tu pary;
+    w tabeli `earnings_events` zostaje nietknięte.
+    """
+    events = _events_by_id_for_session(conn, session_date)
+    latest = _latest_snapshots_by_event(conn, events)
     return [(event, latest[event_id]) for event_id, event in events.items() if event_id in latest]
+
+
+def settlement_candidates(
+    conn: sqlite3.Connection, session_date: date, *, require_snapshot: bool = True
+) -> list[tuple[int, EarningsEvent, EmSnapshot | None]]:
+    """Zdarzenia do rozliczenia, wraz z identyfikatorem i snapshotem, jeśli istnieje.
+
+    `require_snapshot=True` (domyślnie) zwraca tylko zdarzenia z policzonym EM — to domyka
+    pętlę EM -> realizacja. `False` zwraca **wszystkie** zdarzenia z wyliczoną sesją, także te
+    bez EM: ich ruch jest pełnoprawną obserwacją dla targetu fazy 2 i dla hipotezy D3, które
+    liczą się z samych cen (SPEC §2.1, §3.1). Rozliczenia bez EM mają `em_ratio`, `vrp`
+    i `exceeded_em` równe NULL.
+    """
+    events = _events_by_id_for_session(conn, session_date)
+    latest = _latest_snapshots_by_event(conn, events)
+    candidates: list[tuple[int, EarningsEvent, EmSnapshot | None]] = []
+    for event_id, event in events.items():
+        snapshot = latest.get(event_id)
+        if snapshot is None and require_snapshot:
+            continue
+        candidates.append((event_id, event, snapshot))
+    return candidates
 
 
 # ------------------------------------------------------------------ outcomes

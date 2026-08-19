@@ -329,3 +329,10 @@ def test_window_gate_does_not_touch_the_database(
     monkeypatch.setattr("emscan.__main__._now", lambda: OUTSIDE_WINDOW)
     runner.invoke(app, ["scan", "--window", "skip"])
     assert not (workspace / "emscan.db").exists()
+
+
+def test_settle_accepts_the_widened_scope(workspace: Path) -> None:
+    """Pusta baza, więc bez sieci — sprawdzamy parsowanie flagi, nie przepływ."""
+    result = runner.invoke(app, ["settle", "--date", SCAN_DAY.isoformat(), "--all-events"])
+    assert result.exit_code == 0
+    assert "rozliczonych: 0" in result.stdout

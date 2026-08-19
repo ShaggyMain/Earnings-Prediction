@@ -370,6 +370,8 @@ def compute_expected_move(
         put_ask=atm_put.ask,
         call_mid=call_leg.price,
         put_mid=put_leg.price,
+        underlying_bid=chain.underlying_bid,
+        underlying_ask=chain.underlying_ask,
         straddle=straddle,
         em_abs=em_abs,
         em_pct=em_pct,

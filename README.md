@@ -130,6 +130,13 @@ WHERE e.ticker = 'NVDA' ORDER BY e.event_date DESC;
 
 Bez `sqlite3` w systemie: `python -c "import sqlite3; ..."` albo dowolna przeglądarka SQLite.
 
+### Hipotezy i wyniki
+
+`docs/EVALUATION.md` trzyma **pre-rejestracje** — hipotezy zapisane przed zobaczeniem danych,
+razem z progami, testami i kryterium rozstrzygnięcia — oraz wyniki, w tym negatywne. Zapisana
+jest tam hipoteza D3 (odwracanie luki otwarcia) i obowiązkowe baseline'y fazy 2. Reguła ustalona
+po obejrzeniu danych nie odpowiada już na nic, dlatego ten plik powstaje przed nimi.
+
 ## Rekomendacji tu nie ma i nie będzie
 
 To jest zamierzone, nie brak funkcji — SPEC §Czego NIE robić zakazuje generowania rekomendacji

@@ -66,6 +66,8 @@ def snapshot(event_id: int, *, minute: int = 30, em_pct: float | None = 0.08) ->
         put_ask=5.2,
         call_mid=5.0,
         put_mid=5.0,
+        underlying_bid=99.98,
+        underlying_ask=100.02,
         straddle=10.0,
         em_abs=8.5,
         em_pct=em_pct,
@@ -170,3 +172,10 @@ def test_memory_database_has_the_same_schema() -> None:
     with open_memory_db() as memory:
         insert_snapshot(memory, snapshot(stored(memory, "LIQD")))
         assert len(latest_snapshots_for_session(memory, SESSION)) == 1
+
+
+def test_underlying_quote_survives_the_round_trip(conn: sqlite3.Connection) -> None:
+    """Bez tych dwóch kolumn nie da się wycenić transakcji na akcjach (docs/EVALUATION.md)."""
+    insert_snapshot(conn, snapshot(stored(conn, "LIQD")))
+    (_, restored), *_ = latest_snapshots_for_session(conn, SESSION)
+    assert (restored.underlying_bid, restored.underlying_ask) == (99.98, 100.02)

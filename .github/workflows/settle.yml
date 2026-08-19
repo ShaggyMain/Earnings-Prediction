@@ -41,8 +41,11 @@ jobs:
         run: uv sync
 
       - name: Rozliczenie
+        # --all-events: rozliczamy też zdarzenia bez policzonego EM. Ich ruch jest obserwacją
+        # dla targetu fazy 2 i dla hipotezy D3 (docs/EVALUATION.md), a bez tej flagi tracimy
+        # około 3/4 próbki dziennie. Kosztuje tyle samo razy więcej zapytań o ceny.
         run: |
-          uv run python -m emscan --json-logs settle \
+          uv run python -m emscan --json-logs settle --all-events \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
 
       - name: Czy baza się zmieniła?

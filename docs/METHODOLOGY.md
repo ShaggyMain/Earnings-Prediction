@@ -55,6 +55,12 @@ a surowe `bid`/`ask` zostają obok w tym samym wierszu, więc nic nie ginie.
   flagi — zero uruchomiłoby `low_oi` bez podstawy.
 - **`volume_atm`** := **suma** wolumenu obu nóg. To miara aktywności na strike'u, nie warunek
   dopuszczenia — dlatego inaczej niż OI.
+- **`underlying_bid` / `underlying_ask`** := kwotowanie **akcji** w chwili snapshotu, jeśli
+  dostawca je podaje (CBOE podaje, w tej samej odpowiedzi co łańcuch). Koszt transakcji na
+  instrumencie bazowym jest o dwa rzędy wielkości mniejszy od spreadu opcyjnego, więc
+  `rel_spread` **nie jest** jego przybliżeniem — na próbce z 19.08 mediana spreadu opcyjnego
+  wyniosła 28,6%. Bez tych dwóch kolumn nie da się uczciwie wycenić hipotezy D3
+  (`docs/EVALUATION.md`).
 - **`iv_atm`** := średnia IV obu nóg ATM, licząc tylko wartości dodatnie. CBOE zwraca `iv: 0.0`
   dla części kontraktów; użycie takiego zera dałoby EM równy zero, czyli dokładnie ciche zero,
   którego SPEC zakazuje.

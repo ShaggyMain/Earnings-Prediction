@@ -213,8 +213,8 @@ def _echo_settlement(result: SettleResult) -> None:
         f"(odniesienie: zamknięcie {result.baseline_date.isoformat()})"
     )
     typer.echo(
-        f"kandydatów ze snapshotem: {len(result.rows)}, rozliczonych: {len(result.settled)}, "
-        f"ruch przebił EM: {result.exceeded_em}"
+        f"kandydatów: {len(result.rows)}, rozliczonych: {len(result.settled)} "
+        f"(w tym bez EM: {result.settled_without_em}), ruch przebił EM: {result.exceeded_em}"
     )
     if result.missing:
         powody = ", ".join(f"{reason}={count}" for reason, count in result.missing.items())
@@ -335,6 +335,13 @@ def settle(
             help="Dzień skanu w ISO. Domyślnie poprzednik ostatniej zamkniętej sesji.",
         ),
     ] = None,
+    all_events: Annotated[
+        bool,
+        typer.Option(
+            "--all-events",
+            help="Rozlicz też zdarzenia bez EM — obserwacje dla fazy 2 i D3, więcej zapytań",
+        ),
+    ] = False,
 ) -> None:
     """Rozliczenie sesji następującej po dniu skanu — SPEC §1.6.
 
@@ -344,6 +351,10 @@ def settle(
 
     Domyślna data **nie** jest dzisiejsza: rozliczenie chodzi dzień po skanie, więc „dziś"
     wskazywałoby sesję, która się jeszcze nie odbyła.
+
+    `--all-events` rozszerza zakres na zdarzenia bez policzonego EM. Ich ruch jest pełnoprawną
+    obserwacją dla targetu fazy 2 i dla hipotezy D3 (SPEC §2.1, §3.1), a zawężenie do zdarzeń
+    z EM wyrzuca większość próbki — na sesji 2026-08-20 zostawiało 16 z 59.
     """
     settings = get_settings()
     scan_date = _parse_day(day) if day is not None else default_settle_scan_date(_now())
@@ -362,6 +373,7 @@ def settle(
                 conn=conn,
                 prices=prices,
                 settled_at=_now(),
+                require_snapshot=not all_events,
             )
     finally:
         prices.close()
