@@ -255,6 +255,8 @@ class CboeOptionsSource(OptionsChainSource):
             calls=tuple(sorted(calls, key=lambda q: q.strike)),
             puts=tuple(sorted(puts, key=lambda q: q.strike)),
             fetched_at=datetime.now(tz=ET),
+            underlying_bid=quote.bid,
+            underlying_ask=quote.ask,
         )
 
     def is_covered(self, ticker: str) -> bool:

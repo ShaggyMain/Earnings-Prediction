@@ -157,6 +157,12 @@ class EmSnapshot(BaseModel):
     call_mid: float | None = None
     put_mid: float | None = None
 
+    underlying_bid: float | None = None
+    underlying_ask: float | None = None
+    """Kwotowanie akcji w momencie snapshotu — koszt wejścia dla hipotez na instrumencie
+    bazowym (D3 z SPEC §3.1). Spread opcyjny jest o dwa rzędy wielkości większy i nie
+    zastępuje tej informacji."""
+
     straddle: float | None = None
     em_abs: float | None = None
     em_pct: float | None = None

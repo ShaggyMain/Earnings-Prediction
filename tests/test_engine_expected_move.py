@@ -656,3 +656,25 @@ def test_dte_is_counted_in_new_york_not_in_utc() -> None:
         snapshot_at=datetime(2026, 8, 20, 22, 0, tzinfo=ET),
     )
     assert snapshot.dte == 1
+
+
+def test_snapshot_carries_the_underlying_quote(amat: dict[date, OptionChain]) -> None:
+    """Snapshot musi zapisać koszt wejścia w akcje, nie tylko w opcje."""
+    snapshot = compute_expected_move(
+        amat[AMAT_NEAR],
+        event_id=EVENT_ID,
+        snapshot_at=datetime(2026, 8, 14, 15, 30, tzinfo=ET),
+    )
+    assert (snapshot.underlying_bid, snapshot.underlying_ask) == (506.8, 507.0)
+
+
+def test_missing_underlying_quote_stays_none() -> None:
+    """Dostawca, który nie podaje kwotowania akcji, nie może dać zera w bazie."""
+    chain = ladder_chain((100.0,), spot=100.0)
+    snapshot = compute_expected_move(
+        chain,
+        event_id=EVENT_ID,
+        snapshot_at=datetime(2026, 8, 17, 15, 30, tzinfo=ET),
+    )
+    assert snapshot.underlying_bid is None
+    assert snapshot.underlying_ask is None

@@ -17,6 +17,7 @@ from emscan.db import (
     insert_snapshot,
     open_memory_db,
     outcomes_for_session,
+    settlement_candidates,
     upsert_events,
 )
 from emscan.engine.outcomes import (
@@ -428,3 +429,91 @@ def test_default_settle_date_is_not_today() -> None:
 def test_naive_moment_is_rejected() -> None:
     with pytest.raises(ValueError, match="strefą"):
         last_closed_session(datetime(2026, 8, 18, 17, 0))  # noqa: DTZ001
+
+
+# ------------------------------------------------------------------ szerszy zakres rozliczenia
+
+
+def test_candidates_default_to_events_with_em(conn: sqlite3.Connection) -> None:
+    seed(conn, [event("WITH", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)])
+    seed(
+        conn,
+        [event("WITHOUT", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)],
+        with_snapshot=False,
+    )
+    default = settlement_candidates(conn, SESSION)
+    assert [event.ticker for _, event, _ in default] == ["WITH"]
+
+
+def test_candidates_can_include_events_without_em(conn: sqlite3.Connection) -> None:
+    """Target fazy 2 i D3 liczą się z cen, więc zdarzenie bez EM to pełnoprawna obserwacja."""
+    seed(conn, [event("WITH", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)])
+    seed(
+        conn,
+        [event("WITHOUT", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)],
+        with_snapshot=False,
+    )
+    widened = settlement_candidates(conn, SESSION, require_snapshot=False)
+    assert sorted(event.ticker for _, event, _ in widened) == ["WITH", "WITHOUT"]
+    assert [snapshot is None for _, event, snapshot in widened if event.ticker == "WITHOUT"] == [
+        True
+    ]
+
+
+def test_settle_without_em_records_the_move_and_nulls_the_comparison(
+    conn: sqlite3.Connection,
+) -> None:
+    """Ruch jest daną. Porównania z EM nie ma, więc em_ratio, vrp i exceeded_em są NULL."""
+    seed(
+        conn,
+        [event("NOEM", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)],
+        with_snapshot=False,
+    )
+    history = [bar(SCAN_DAY, open_=99.0, close=100.0), bar(SESSION, open_=104.0, close=106.0)]
+    result = run_settle(
+        scan_date=SCAN_DAY,
+        conn=conn,
+        prices=FakePrices({"NOEM": history}),
+        settled_at=SETTLED_AT,
+        require_snapshot=False,
+    )
+
+    assert len(result.settled) == 1
+    assert result.settled_without_em == 1
+    outcome = next(iter(outcomes_for_session(conn, SESSION).values()))
+    assert outcome.close_pct == pytest.approx(0.06)
+    assert outcome.intraday_pct == pytest.approx(106.0 / 104.0 - 1)
+    assert (outcome.em_ratio, outcome.vrp, outcome.exceeded_em) == (None, None, None)
+
+
+def test_widened_scope_settles_both_kinds(conn: sqlite3.Connection) -> None:
+    seed(conn, [event("WITH", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)])
+    seed(
+        conn,
+        [event("WITHOUT", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)],
+        with_snapshot=False,
+    )
+    history = [bar(SCAN_DAY, open_=99.0, close=100.0), bar(SESSION, open_=104.0, close=106.0)]
+    result = run_settle(
+        scan_date=SCAN_DAY,
+        conn=conn,
+        prices=FakePrices({"WITH": history, "WITHOUT": history}),
+        settled_at=SETTLED_AT,
+        require_snapshot=False,
+    )
+    assert len(result.settled) == 2
+    assert result.settled_without_em == 1
+    assert len(outcomes_for_session(conn, SESSION)) == 2
+
+
+def test_narrow_scope_asks_prices_only_about_measured_events(conn: sqlite3.Connection) -> None:
+    """Domyślny zakres trzyma kaskadę: bez EM nie pytamy o ceny."""
+    seed(
+        conn,
+        [event("NOEM", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)],
+        with_snapshot=False,
+    )
+    prices = FakePrices({"NOEM": [bar(SESSION, open_=104.0, close=106.0)]})
+    result = run_settle(scan_date=SCAN_DAY, conn=conn, prices=prices, settled_at=SETTLED_AT)
+    assert prices.tickers_fetched == []
+    assert result.rows == ()

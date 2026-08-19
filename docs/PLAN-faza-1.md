@@ -310,6 +310,26 @@ Finnhub zachowuje `hour` dla dat przeszłych** — to jedno zapytanie, które mo
 | Zero pobranych dni + awarie | Wyjątek | Backfill, który nic nie pobrał, nie może udawać sukcesu |
 | Migracja schematu | `init_schema` dokłada brakujące kolumny, indeksy powstają **po** migracji | Baza z wcześniejszego skanu nie dostałaby `date_conflict` z `CREATE TABLE IF NOT EXISTS`, a indeks na nieistniejącej kolumnie wywracał otwarcie bazy — złapane testem |
 
+## Decyzje sesji 8 (2026-08-19, po zmergowaniu PR #1)
+
+Trzy zmiany wynikające z pytania „czy nie lepiej skupić się na D3", z odpowiedzią: **mierzyć D3,
+nie przestawiać na D3**. Ruch cen da się policzyć z darmowych danych w każdej chwili, a EM jest
+jedyną rzeczą, której historycznie kupić nie można — porzucenie jej byłoby wymianą aktywa
+unikalnego na powszechne.
+
+| Zmiana | Po co | Koszt |
+|---|---|---|
+| `settle --all-events` | Rozlicza też zdarzenia bez EM. Target fazy 2 i D3 liczą się z samych cen, a zawężenie do zdarzeń z EM zostawiało **16 z 59** obserwacji na sesji 20.08 | 3,7× więcej zapytań o ceny; włączone w `settle.yml` |
+| `underlying_bid` / `underlying_ask` w snapshocie | CBOE podaje kwotowanie akcji w tej samej odpowiedzi co łańcuch, a my je wyrzucaliśmy. Bez tego nie da się wycenić transakcji na akcjach: mediana spreadu opcyjnego 28,6% vs punkty bazowe na akcjach | dwie kolumny + migracja |
+| `docs/EVALUATION.md` | Pre-rejestracja D3 i baseline'ów fazy 2 — próg, test, block bootstrap po dniach, model kosztu, kryterium rozstrzygnięcia, lista wykluczonych pułapek | dokument |
+
+Arytmetyka, która trzyma oczekiwania na miejscu: przy jednostce = dzień wykrycie trafności 55%
+wymaga 783 obserwacji, czyli **3,1 roku**; 60% wymaga 194, czyli 0,8 roku. Efekt mniejszy niż 60%
+jest w tym projekcie niewykrywalny w rozsądnym czasie i EVALUATION.md mówi to wprost.
+
+Migracja schematu przeszła z pojedynczego przypadku na tabelę `MIGRATIONS` — baza z 19.08 jest
+już w repo, więc każda kolejna kolumna musi się dokładać do istniejącego pliku.
+
 ## Nauczka z CI (2026-08-18) — sprawdzaj Actions po pushu
 
 Przebiegi CI numer 6, 7 i 8 były **czerwone**, a ja tego nie zauważyłem przez trzy kroki,

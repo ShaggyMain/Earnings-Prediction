@@ -3,10 +3,14 @@
 `scan` zapisuje, ile ruchu wycenił rynek. `settle` zapisuje, ile ruchu faktycznie było.
 Dopiero para tych liczb — `em_ratio` i `vrp` — jest tym, po co ten projekt istnieje.
 
-Rozliczamy zdarzenia, **które mają snapshot EM**. Ruch samych cen dla całego uniwersum
-zbierze `backfill` (krok 8) i to on jest zbiorem treningowym fazy 2 (SPEC §2.1); `settle`
-domyka pętlę EM -> realizacja, więc pytanie o ceny idzie tylko o te tickery, dla których
-EM w ogóle policzyliśmy. Kaskada ze SPEC §B.2 obowiązuje i tutaj.
+Domyślnie rozliczamy zdarzenia, **które mają snapshot EM** — to domyka pętlę
+EM -> realizacja i trzyma liczbę zapytań przy kaskadzie ze SPEC §B.2.
+
+`require_snapshot=False` rozszerza zakres na **wszystkie** zdarzenia z wyliczoną sesją. Ma to
+sens, bo target fazy 2 (`abs_move_pct`) i hipoteza D3 (`intraday_pct`) liczą się z samych cen
+i nie potrzebują EM — a zawężanie do zdarzeń z EM wyrzuca większość obserwacji. Na sesji
+2026-08-20 było to 16 zdarzeń z 59 możliwych, czyli 3,7-krotna różnica. Cena: tyle samo razy
+więcej zapytań o ceny.
 
 **Polityka korekt o splity — zweryfikowana 2026-08-18, nie założona.** Nasdaq zwraca ceny
 **skorygowane retroaktywnie**: w szeregach LRCX, ORLY, IBKR, ANET i PANW, które w oknie
@@ -34,7 +38,7 @@ from datetime import date, datetime, timedelta
 from enum import StrEnum
 from sqlite3 import Connection
 
-from emscan.db import insert_outcome, latest_snapshots_for_session
+from emscan.db import insert_outcome, settlement_candidates
 from emscan.engine.events import baseline_date_for
 from emscan.engine.scan import target_session
 from emscan.log import get_logger
@@ -109,6 +113,15 @@ class SettleResult:
     def exceeded_em(self) -> int:
         """Ile ruchów przebiło EM. Rynek zwykle przeszacowuje — patrz README §Ograniczenia."""
         return sum(1 for row in self.settled if row.outcome and row.outcome.exceeded_em)
+
+    @property
+    def settled_without_em(self) -> int:
+        """Ile rozliczeń powstało bez punktu odniesienia w EM.
+
+        Takie wiersze mają ruch, ale `em_ratio` i `vrp` są NULL. Są danymi dla fazy 2 i dla D3,
+        nie są danymi o przeszacowaniu zmienności.
+        """
+        return sum(1 for row in self.settled if row.outcome and row.outcome.em_ratio is None)
 
 
 def last_closed_session(moment: datetime) -> date:
@@ -212,6 +225,7 @@ def run_settle(
     conn: Connection,
     prices: PriceSource,
     settled_at: datetime,
+    require_snapshot: bool = True,
 ) -> SettleResult:
     """Rozlicza sesję następującą po `scan_date` — SPEC §1.6.
 
@@ -221,13 +235,17 @@ def run_settle(
 
     Ponowne uruchomienie nadpisuje rozliczenie (`UNIQUE(event_id)`): pierwszy przebieg mógł
     trafić w moment, w którym sesja jeszcze się nie zamknęła.
+
+    Args:
+        require_snapshot: gdy False, rozlicza też zdarzenia bez policzonego EM. Patrz docstring
+            modułu — dla targetu fazy 2 i dla D3 takie zdarzenia są pełnoprawnymi obserwacjami.
     """
     session_date = target_session(scan_date)
     baseline_date = baseline_date_for(session_date)
-    pairs = latest_snapshots_for_session(conn, session_date)
+    candidates = settlement_candidates(conn, session_date, require_snapshot=require_snapshot)
 
     rows: list[SettleRow] = []
-    for event, snapshot in pairs:
+    for event_id, event, snapshot in candidates:
         ticker = event.ticker
         try:
             bars = prices.daily_bars(
@@ -270,10 +288,10 @@ def run_settle(
             continue
 
         outcome = compute_outcome(
-            event_id=snapshot.event_id,
+            event_id=event_id,
             baseline_close=baseline_bar.close,
             session_bar=session_bar,
-            em_pct=snapshot.em_pct,
+            em_pct=snapshot.em_pct if snapshot is not None else None,
             settled_at=settled_at,
         )
         insert_outcome(conn, outcome)
@@ -305,6 +323,7 @@ def run_settle(
         baseline_date=baseline_date.isoformat(),
         candidates=len(result.rows),
         settled=len(result.settled),
+        settled_without_em=result.settled_without_em,
         exceeded_em=result.exceeded_em,
         missing={str(reason): count for reason, count in result.missing.items()},
     )

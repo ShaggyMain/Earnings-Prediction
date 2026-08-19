@@ -82,6 +82,22 @@ class OptionChain(BaseModel):
     calls: tuple[OptionQuote, ...]
     puts: tuple[OptionQuote, ...]
     fetched_at: datetime
+    underlying_bid: float | None = None
+    underlying_ask: float | None = None
+    """Kwotowanie **akcji**, jeśli dostawca je podaje.
+
+    Potrzebne do uczciwej wyceny kosztu transakcji na instrumencie bazowym: `rel_spread`
+    dotyczy opcji i jest o dwa rzędy wielkości większy, więc nie nadaje się jako przybliżenie.
+    None znaczy „dostawca nie podał", nigdy „spread zerowy".
+    """
+
+    @property
+    def underlying_rel_spread(self) -> float | None:
+        """Spread akcji jako ułamek środka kwotowania. None przy braku którejkolwiek nogi."""
+        bid, ask = self.underlying_bid, self.underlying_ask
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            return None
+        return (ask - bid) / ((bid + ask) / 2)
 
 
 class DailyBar(BaseModel):
