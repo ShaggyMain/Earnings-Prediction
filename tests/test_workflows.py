@@ -34,12 +34,19 @@ def test_both_workflows_share_one_concurrency_group(path: Path) -> None:
     assert "group: emscan-database" in path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize(("path", "hours"), [(SCAN, (19, 20)), (SETTLE, (21, 22))])
-def test_dst_pair_of_crons(path: Path, hours: tuple[int, int]) -> None:
-    """Dwa wpisy godzinę po sobie: jeden trafia w porę letnią, drugi w zimową."""
+@pytest.mark.parametrize(
+    ("path", "hours", "minute"), [(SCAN, (19, 20), "0"), (SETTLE, (21, 22), "0")]
+)
+def test_dst_pair_of_crons(path: Path, hours: tuple[int, int], minute: str) -> None:
+    """Dwa wpisy godzinę po sobie: jeden trafia w porę letnią, drugi w zimową.
+
+    Skan celuje w 15:00 ET, nie 15:30, bo okno kończy się 15:45 i zapas na opóźnienie
+    harmonogramu ma wynosić 45 minut, nie 15 — patrz `trading_calendar.SCAN_WINDOW_END`.
+    """
     crons = re.findall(r'cron: "(\d+) (\d+) ([^"]+)"', path.read_text(encoding="utf-8"))
     assert len(crons) == 2
     assert tuple(int(hour) for _, hour, _ in crons) == hours
+    assert {value for value, _, _ in crons} == {minute}
     assert crons[0][0] == crons[1][0]  # ta sama minuta
     assert crons[0][2] == crons[1][2]  # ten sam zakres dni
 

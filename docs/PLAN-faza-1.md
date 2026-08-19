@@ -360,6 +360,25 @@ Sprawdzanie klasy dostawcy w logice biznesowej łamało SPEC §1.2 i uniemożliw
 
 Stan bazy po tej sesji: 401 kB, w tym 2003 świece czterech instrumentów rynkowych za dwa lata.
 
+### Okno skanu przesunięte, bo cron się spóźnia
+
+Pierwszy przebieg `Scan` z harmonogramu (2026-08-19) zachował się poprawnie — krok skanu zajął
+0 sekund, baza bez zmian, raport i commit pominięte, bo 20:30 UTC to w czasie letnim 16:30 ET.
+Ale **odpalił się o 20:53, czyli 23 minuty po terminie.**
+
+Przy cronie na 15:30 ET i oknie kończącym się o 16:00 zapasu było 30 minut. Takie opóźnienie
+skasowałoby cały dzień danych, a okna nie da się odtworzyć. Dlatego:
+
+| | Przed | Po |
+|---|---|---|
+| Cron | 19:30 / 20:30 UTC (15:30 ET) | **19:00 / 20:00 UTC (15:00 ET)** |
+| Okno | 15:00–16:00 ET | **14:30–15:45 ET** |
+| Zapas na opóźnienie | 30 min | **45 min** |
+
+Granic okna nie wolno ruszać osobno: rozszerzenie do 16:00 sprawiłoby, że w czasie zimowym
+**oba** wpisy crona wpadają w okno i skan rusza dwa razy. Macierz sprawdzona na kodzie —
+dokładnie jeden wpis z pary trafia w okno w każdej porze roku.
+
 ## Nauczka z CI (2026-08-18) — sprawdzaj Actions po pushu
 
 Przebiegi CI numer 6, 7 i 8 były **czerwone**, a ja tego nie zauważyłem przez trzy kroki,

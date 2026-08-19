@@ -6,8 +6,10 @@ name: Scan
 # nie robiąc nic. Ten sam mechanizm łapie święta NYSE, których cron nie zna.
 on:
   schedule:
-    - cron: "30 19 * * 1-5" # 15:30 ET w czasie letnim (EDT)
-    - cron: "30 20 * * 1-5" # 15:30 ET w czasie zimowym (EST)
+    # 15:00 ET, nie 15:30: harmonogramy Actions spóźniają się (zaobserwowane 23 minuty),
+    # a okno skanu kończy się 15:45 ET. Wcześniejszy cron daje 45 minut zapasu zamiast 15.
+    - cron: "0 19 * * 1-5" # 15:00 ET w czasie letnim (EDT)
+    - cron: "0 20 * * 1-5" # 15:00 ET w czasie zimowym (EST)
   workflow_dispatch:
     inputs:
       date:

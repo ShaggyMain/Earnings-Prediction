@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -140,35 +140,45 @@ def test_is_in_session(moment: datetime, expected: bool) -> None:
 @pytest.mark.parametrize(
     ("moment", "expected"),
     [
-        (et(2026, 8, 18, 15, 30), True),
         (et(2026, 8, 18, 15, 0), True),
-        (et(2026, 8, 18, 16, 0), True),
-        (et(2026, 8, 18, 14, 59), False),
-        (et(2026, 8, 18, 16, 1), False),
-        (et(2026, 8, 15, 15, 30), False),  # sobota
-        (et(2026, 7, 3, 15, 30), False),  # święto
+        (et(2026, 8, 18, 14, 30), True),
+        (et(2026, 8, 18, 15, 45), True),
+        (et(2026, 8, 18, 14, 29), False),
+        (et(2026, 8, 18, 15, 46), False),
+        (et(2026, 8, 18, 16, 0), False),  # zamknięcie: kwotowania już nieodświeżane
+        (et(2026, 8, 15, 15, 0), False),  # sobota
+        (et(2026, 7, 3, 15, 0), False),  # święto
     ],
 )
 def test_is_in_scan_window(moment: datetime, expected: bool) -> None:
     assert is_in_scan_window(moment) is expected
 
 
-def test_summer_cron_hits_the_window_and_winter_cron_misses_it() -> None:
-    """To jest cała asercja ze SPEC §1.8: cron w UTC nie przesuwa się z DST.
+def test_exactly_one_cron_of_the_dst_pair_hits_the_window() -> None:
+    """Asercja ze SPEC §1.8: cron w UTC nie przesuwa się z DST.
 
-    Wpis `30 19 * * 1-5` to 15:30 ET w sierpniu i 14:30 ET w styczniu. Drugi wpis, godzinę
-    później, jest tym właściwym w czasie zimowym — a o tym, który z nich liczy się dzisiaj,
-    rozstrzyga `is_in_scan_window`, nie kalendarz w cronie.
+    Wpis `0 19 * * 1-5` to 15:00 ET w sierpniu i 14:00 ET w styczniu. Drugi wpis, godzinę
+    później, jest tym właściwym w czasie zimowym. **Dokładnie jeden** z pary musi wpadać
+    w okno — gdyby oba, skan ruszałby dwa razy dziennie.
     """
-    summer = datetime(2026, 8, 18, 19, 30, tzinfo=UTC_TZ)
-    winter_early = datetime(2027, 1, 19, 19, 30, tzinfo=UTC_TZ)
-    winter_late = datetime(2027, 1, 19, 20, 30, tzinfo=UTC_TZ)
+    for day in (datetime(2026, 8, 18, tzinfo=UTC_TZ), datetime(2027, 1, 19, tzinfo=UTC_TZ)):
+        hits = [is_in_scan_window(day.replace(hour=hour)) for hour in (19, 20)]
+        assert hits.count(True) == 1, f"{day:%Y-%m-%d}: {hits}"
 
-    assert is_in_scan_window(summer) is True
-    assert is_in_scan_window(winter_early) is False
-    assert is_in_scan_window(winter_late) is True
-    # Ten sam wpis cron dałby w sierpniu godzinę po zamknięciu sesji.
-    assert is_in_scan_window(datetime(2026, 8, 18, 20, 30, tzinfo=UTC_TZ)) is False
+    assert is_in_scan_window(datetime(2026, 8, 18, 19, tzinfo=UTC_TZ)) is True  # lato: 15:00
+    assert is_in_scan_window(datetime(2027, 1, 19, 20, tzinfo=UTC_TZ)) is True  # zima: 15:00
+
+
+def test_window_tolerates_a_delayed_cron() -> None:
+    """Actions spóźnia harmonogramy — 2026-08-19 zaobserwowane 23 minuty.
+
+    Cron celuje w 15:00 ET, okno kończy się 15:45, więc zapasu jest 45 minut. Większe
+    opóźnienie oznacza pominięcie dnia i nie da się go odtworzyć — stąd `workflow_dispatch`.
+    """
+    punctual = datetime(2026, 8, 18, 19, 0, tzinfo=UTC_TZ)
+    assert is_in_scan_window(punctual + timedelta(minutes=23)) is True
+    assert is_in_scan_window(punctual + timedelta(minutes=45)) is True
+    assert is_in_scan_window(punctual + timedelta(minutes=46)) is False
 
 
 @pytest.mark.parametrize("check", [is_in_session, is_in_scan_window])
