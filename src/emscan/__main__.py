@@ -1,7 +1,7 @@
 """CLI — SPEC §1.7.
 
-Zaimplementowane są `scan`, `settle` i `report`. `stats` i `backfill` powstają w kroku 8 —
-celowo nie ma dla nich atrap, bo komenda, która niczego nie robi, jest gorsza od komendy,
+Zaimplementowane są `scan`, `settle`, `report` i `backfill`. `stats` powstaje wraz z fazą 2 —
+celowo nie ma dla niej atrapy, bo komenda, która niczego nie robi, jest gorsza od komendy,
 której nie ma.
 
 **Znaczenie `--date` jest jedno we wszystkich komendach: to dzień skanu D.** Sesją, o którą
@@ -31,6 +31,12 @@ from emscan.db import (
     open_db,
     open_memory_db,
     outcomes_for_session,
+)
+from emscan.engine.backfill import (
+    DEFAULT_MIN_INTERVAL,
+    BackfillResult,
+    run_backfill,
+    trading_days,
 )
 from emscan.engine.outcomes import SettleResult, default_settle_scan_date, run_settle
 from emscan.engine.scan import ScanResult, run_scan, target_session
@@ -362,6 +368,97 @@ def settle(
 
     _echo_settlement(result)
     typer.echo(f"raport: python -m emscan report --date {scan_date.isoformat()}")
+
+
+def _echo_backfill(result: BackfillResult) -> None:
+    typer.echo(
+        f"backfill {result.start.isoformat()}..{result.end.isoformat()}: "
+        f"sesji w zakresie {result.days_considered}, pobranych {result.days_fetched}, "
+        f"pominiętych (już w bazie) {result.days_skipped}"
+    )
+    typer.echo(
+        f"zdarzeń zapisanych: {result.events_written}, "
+        f"oznaczonych duplikatów daty: {result.conflicts_marked}"
+    )
+    for failure in result.failures[:5]:
+        typer.echo(f"  awaria: {failure}")
+    if len(result.failures) > 5:
+        typer.echo(f"  ... i {len(result.failures) - 5} dalszych awarii")
+    if not result.complete:
+        typer.echo("przebieg niepełny — uruchom ponownie, pobrane dni zostaną pominięte")
+
+
+@app.command()
+def backfill(
+    date_from: Annotated[str, typer.Option("--from", help="Początek zakresu, ISO")],
+    date_to: Annotated[
+        str | None, typer.Option("--to", help="Koniec zakresu, ISO. Puste = dziś")
+    ] = None,
+    no_resume: Annotated[
+        bool, typer.Option("--no-resume", help="Pobierz też dni, które są już w bazie")
+    ] = False,
+) -> None:
+    """Historyczny kalendarz wyników — materiał wyjściowy dla fazy 2 (SPEC §2.1).
+
+    **Zapisuje sam kalendarz, bez EM i bez rozliczeń.** Historyczne ceny opcji są płatne, więc
+    EM buduje się wyłącznie do przodu przez `scan`. Rozliczeń historycznych nie liczymy, bo
+    Nasdaq retroaktywnie kasuje porę publikacji (BMO/AMC), a bez niej sesja rozliczeniowa jest
+    niejednoznaczna — patrz `engine/backfill.py` i docs/PLAN-faza-1.md.
+
+    Zakres dwóch lat to kilkaset zapytań i kilka minut. Przebieg przerwany w połowie wolno
+    uruchomić ponownie: dni już obecne w bazie są pomijane.
+    """
+    settings = get_settings()
+    start = _parse_day(date_from)
+    end = _parse_day(date_to) if date_to is not None else _now().date()
+    if start > end:
+        raise typer.BadParameter(f"--from ({start}) jest po --to ({end})")
+
+    calendars: list[EarningsCalendarSource] = [
+        NasdaqCalendarSource(
+            user_agent=settings.user_agent,
+            timeout=settings.http_timeout,
+            max_retries=settings.http_max_retries,
+            min_interval=DEFAULT_MIN_INTERVAL,
+            # Bez cache surowych odpowiedzi: kilkaset plików JSON to setki megabajtów,
+            # a wartość diagnostyczna jest tu znikoma.
+            raw_dir=None,
+        )
+    ]
+    if settings.finnhub_api_key:
+        calendars.append(
+            FinnhubCalendarSource(
+                settings.finnhub_api_key,
+                timeout=settings.http_timeout,
+                max_retries=settings.http_max_retries,
+                raw_dir=None,
+            )
+        )
+    else:
+        log.warning("brak klucza Finnhuba — backfill zbierze kalendarz z jednego źródła")
+
+    total = len(trading_days(start, end))
+    typer.echo(f"sesji do przetworzenia: {total}")
+
+    try:
+        with (
+            open_db(settings.resolved_db_path()) as conn,
+            typer.progressbar(length=total, label="backfill") as bar,
+        ):
+            result = run_backfill(
+                start=start,
+                end=end,
+                conn=conn,
+                calendars=calendars,
+                fetched_at=_now(),
+                resume=not no_resume,
+                on_day=lambda _day, index, _total: bar.update(1) if index else None,
+            )
+    finally:
+        for source in calendars:
+            source.close()
+
+    _echo_backfill(result)
 
 
 @app.command()

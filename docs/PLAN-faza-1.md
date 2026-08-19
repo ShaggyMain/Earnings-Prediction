@@ -29,10 +29,10 @@ Numeracja za `docs/SPEC.md` §Kolejność pracy. Krok nie jest zamknięty bez zi
 | 3 | Warstwa źródeł + `models.py` + `db.py` | ✅ zrobione | 103 testy bez sieci, ruff + mypy --strict zielone |
 | 3b | Źródła opcji (CBOE) i cen (Nasdaq) | ✅ zrobione | 135 testów, CI zielone |
 | 4 | Silnik EM (`engine/expected_move.py`) | ✅ zrobione | 188 testów bez sieci, ruff + mypy --strict zielone; METHODOLOGY §2-4 wypełnione |
-| 5 | `scan` + raport | 🟡 kod gotowy | 266 testów bez sieci, wiring sprawdzony na żywym API (6 zapytań). **Zostaje skan w oknie 15:30 ET** |
+| 5 | `scan` + raport | ✅ zrobione | Skan na żywo w oknie 19.08 15:48 ET: 106 zdarzeń, 16 snapshotów, 2 przez filtry. Raport `reports/scan-2026-08-20.md` |
 | 6 | `settle` + `outcomes` | ✅ zrobione | 297 testów bez sieci; testy AMC/BMO/święto/weekend, polityka splitów zweryfikowana na żywych danych |
 | 7 | GitHub Actions (`scan.yml`, `settle.yml`) | ✅ zrobione | 336 testów; asercja okna sesji z parą wpisów cron na DST, wspólna grupa `concurrency` |
-| 8 | `backfill` 2 lata | ⬜ | Zbiór treningowy dla fazy 2 w bazie |
+| 8 | `backfill` 2 lata | 🟡 kalendarz gotowy | 366 testów; kalendarz historyczny wznawialny + polityka duplikatów. **Rozliczenia historyczne wstrzymane** — patrz niżej |
 | 9 | **STOP** — akceptacja przed fazą 2 | ⬜ | — |
 
 ## Blocker po kroku 1 — zdjęty
@@ -161,6 +161,45 @@ właściciela):
 
 Do czasu decyzji: próg zostaje 100, a `--min-oi` pozwala go obniżyć na jeden przebieg.
 
+## ~~Kwestia otwarta: źródła niezgodne co do daty~~ — rozstrzygnięte 2026-08-19
+
+**Oznaczamy oba wiersze flagą `date_conflict` i nie scalamy niczego.** Pełne uzasadnienie
+w `docs/METHODOLOGY.md` §7; tu najważniejsze: żadna dostępna przesłanka nie wskazuje, która
+data jest prawdziwa (`eps_actual` nie występuje u Nasdaqa nigdy, u Finnhuba był `None` dla
+spornych tickerów, trzeciego źródła nie ma), a **rozstrzyganie po cenach jest zakazane**, bo
+wybieranie sesji z większym ruchem zawyża rozkład tej samej zmiennej, którą faza 2 ma
+przewidywać.
+
+Flaga jest wyliczana post-passem po całej tabeli (`db.mark_date_conflicts`), bo para może
+powstać z dwóch różnych runów backfillu. Faza 2 wyklucza takie zdarzenia predykatem
+`WHERE date_conflict = 0`.
+
+## Kwestia otwarta: próg `oi_atm >= 100` odrzuca płynne spółki
+
+Wyszło z próbnego skanu na żywych danych 18.08. Na czterech tickerach z kalendarza:
+
+| Ticker | Spot | `oi_atm` | EM% (A) | Wynik |
+|---|---:|---:|---:|---|
+| KEYS | 361,02 | 52 | 7,70% | odrzucony: `low_oi` |
+| ADI | 391,50 | 34 | 5,29% | odrzucony: `low_oi` |
+| LOW | 216,83 | — | 4,23% | odrzucony: `low_em` |
+| TJX | 151,40 | — | 3,85% | odrzucony: `low_em` |
+
+ADI i KEYS to spółki o kapitalizacji rzędu 100 mld USD — problemem nie jest ich płynność, tylko
+to, że **OI rozkłada się na wiele strike'ów**. Przy cenie 390 USD i odstępie strike'ów 2,5 USD
+na jeden strike zostaje kilkadziesiąt kontraktów, choć cały łańcuch ma ich 1556.
+
+Trzy możliwe kierunki, żaden nie przesądzony (SPEC podaje 100 wprost, więc zmiana wymaga decyzji
+właściciela):
+
+1. `oi_atm` jako **suma** obu nóg zamiast minimum — podnosi wartość dwukrotnie, ale nie zmienia
+   proporcji między spółkami
+2. Próg **zależny od ceny** albo od odstępu strike'ów — trafniejsze, ale wprowadza parametr,
+   którego SPEC nie definiuje
+3. OI **tylko jako flaga**, bez odrzucania — najbliższe zasadzie „nie usuwaj, flaguj" (SPEC §1.4)
+
+Do czasu decyzji: próg zostaje 100, a `--min-oi` pozwala go obniżyć na jeden przebieg.
+
 ## Kwestia otwarta: źródła niezgodne co do **daty** publikacji
 
 Osobny problem od konfliktu pory. 13.08 pięć spółek — ACTU, AIRE, FSI, SOWG, VNRX —
@@ -242,6 +281,34 @@ przez miesiące, więc utrata retencji oznaczałaby utratę całego dorobku.
 | Push | `git pull --rebase --autostash` + 4 próby z narastającym odstępem | Drugi workflow mógł commitować w międzyczasie |
 | Pliki WAL | `data/emscan.db-wal` i `-shm` do `.gitignore` | Transientne i niespójne bez bazy. Sama baza jest kompletna, bo SQLite checkpointuje WAL przy zamknięciu połączenia |
 | `--window` w CLI | Dodane poza listą flag ze SPEC §1.7 | SPEC §1.8 wymaga asercji okna wprost, a workflow woła CLI — asercja musi być tam, gdzie da się ją wywołać |
+
+## Decyzje i ustalenia kroku 8 (2026-08-19, sesja 7)
+
+### Diagnostyka danych historycznych — zanim cokolwiek napisałem
+
+| Co | Wynik |
+|---|---|
+| Zasięg kalendarza Nasdaqa | 2 lata wstecz **działa**: 296 rekordów dla 2024-08-14 |
+| Gęstość rok do roku | porównywalna: 2024-11-06 → 399, 2025-11-05 → 417 |
+| **`timing` historycznie** | **pusty w 100%** — Nasdaq retroaktywnie kasuje flagę BMO/AMC |
+| `eps_actual` | nigdy, także dla dat bieżących |
+
+Pierwsze dwa wiersze zdejmują ryzyko z backfillu kalendarza. Trzeci **wstrzymuje rozliczenia
+historyczne**: bez pory publikacji sesja rozliczeniowa jest niejednoznaczna, a target fazy 2
+liczy się właśnie od niej. Trzy wyjścia opisane w METHODOLOGY §8; **najpierw sprawdzić, czy
+Finnhub zachowuje `hour` dla dat przeszłych** — to jedno zapytanie, które może zamknąć sprawę.
+
+### Pozostałe decyzje
+
+| Temat | Decyzja | Dlaczego tak |
+|---|---|---|
+| Zakres backfillu | Tylko **dni sesyjne** | Publikacja w weekend u spółek amerykańskich jest niespotykana, a to 730 zapytań zamiast 500 |
+| Wznawianie | Dzień obecny w bazie jest pomijany | Dwa lata to kilkaset zapytań i kilka minut; przerwany run musi dać się dokończyć. Dzień faktycznie pusty zostanie pobrany ponownie — świadoma cena za brak tabeli „dni przetworzonych" |
+| Cache surowych odpowiedzi | **Wyłączony** w backfillu | Kilkaset plików JSON to setki megabajtów przy znikomej wartości diagnostycznej |
+| Odstęp między zapytaniami | 0,3 s (`min_interval` dodany do `NasdaqCalendarSource`) | Kilkaset zapytań pod rząd do darmowego endpointu bez odstępu prosi się o odcięcie |
+| Awaria dnia | Powód w wyniku, run idzie dalej; dzień bez wierszy zostanie dopobrany przy wznowieniu | Tak samo jak w skanie i rozliczeniu |
+| Zero pobranych dni + awarie | Wyjątek | Backfill, który nic nie pobrał, nie może udawać sukcesu |
+| Migracja schematu | `init_schema` dokłada brakujące kolumny, indeksy powstają **po** migracji | Baza z wcześniejszego skanu nie dostałaby `date_conflict` z `CREATE TABLE IF NOT EXISTS`, a indeks na nieistniejącej kolumnie wywracał otwarcie bazy — złapane testem |
 
 ## Nauczka z CI (2026-08-18) — sprawdzaj Actions po pushu
 

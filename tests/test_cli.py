@@ -119,9 +119,13 @@ def test_help_lists_the_implemented_commands() -> None:
 
 
 def test_unimplemented_commands_are_absent_not_faked() -> None:
-    """`stats` i `backfill` powstają w kroku 8 — atrapa byłaby gorsza od braku komendy."""
+    """`stats` powstaje wraz z fazą 2 — atrapa byłaby gorsza od braku komendy.
+
+    Uwaga na przyszłość: ta lista **musi** się skracać w tym samym commicie, w którym komenda
+    powstaje. Gdy `backfill` został zaimplementowany, a test nadal go wołał, pytest uruchomił
+    prawdziwy backfill od 2024 roku. Stąd bezpiecznik sieciowy w `conftest.py`.
+    """
     assert runner.invoke(app, ["stats"]).exit_code != 0
-    assert runner.invoke(app, ["backfill", "--from", "2024-01-01"]).exit_code != 0
 
 
 def test_scan_accepts_every_filter_override(

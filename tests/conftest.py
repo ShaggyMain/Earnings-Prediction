@@ -8,12 +8,42 @@ nagranych 2026-08-13 przez `scripts/probe_sources.py` i przyciętych skryptem
 from __future__ import annotations
 
 import json
+import socket
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", ""}
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Blokuje prawdziwe połączenia w każdym teście — SPEC §B.3 pkt 6.
+
+    `respx` przechwytuje żądania w warstwie transportu httpx, więc testy na nagranych fixtures
+    działają jak dotąd. Ten bezpiecznik łapie to, czego respx nie widzi: komendę CLI, która
+    naprawdę idzie do sieci, bo test nie spodziewał się, że ona już istnieje. Dokładnie tak
+    `runner.invoke(app, ["backfill", ...])` przeszedł 422 dni z żywego API, zamiast zwrócić
+    kod 2 za nieznaną komendę.
+    """
+    real_connect = socket.socket.connect
+
+    def guard(self: socket.socket, address: Any) -> None:
+        host = address[0] if isinstance(address, tuple) else address
+        if host in _LOCAL_HOSTS:
+            real_connect(self, address)
+            return
+        raise RuntimeError(
+            f"test próbował połączyć się z {host!r} — sieć w testach jest zabroniona "
+            "(SPEC §B.3 pkt 6). Użyj respx albo atrapy z tests/fakes.py."
+        )
+
+    monkeypatch.setattr(socket.socket, "connect", guard)
+    yield
 
 
 def load_fixture(name: str) -> Any:

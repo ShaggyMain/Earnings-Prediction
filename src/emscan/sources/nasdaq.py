@@ -80,12 +80,16 @@ class NasdaqCalendarSource(EarningsCalendarSource):
         user_agent: str,
         timeout: float = 20.0,
         max_retries: int = 3,
+        min_interval: float = 0.0,
         raw_dir: Path | None = None,
     ) -> None:
         self._fetcher = HttpFetcher(
             self.name,
             timeout=timeout,
             max_retries=max_retries,
+            # Skan pyta o dwa dni, więc domyślnie bez odstępu. Backfill pyta o kilkaset
+            # i podaje wartość dodatnią — patrz engine/backfill.py.
+            min_interval=min_interval,
             raw_dir=raw_dir,
             headers={"User-Agent": user_agent, "Accept": "application/json"},
         )

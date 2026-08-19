@@ -1,7 +1,7 @@
 # METHODOLOGY — jak liczymy expected move i actual move
 
-> **Status:** §1-4 wypełnione w kroku 4 razem z `engine/expected_move.py`.
-> §5-6 (rozliczenie i polityka splitów) czekają na krok 6 — nie zgadujemy ich z góry.
+> **Status:** §1-6 wypełnione wraz z krokami 4 i 6. §7-8 dołożone w kroku 8 —
+> polityka duplikatów daty i zweryfikowane ograniczenia danych historycznych.
 
 ## 1. Mapowanie zdarzenia na sesję
 
@@ -224,3 +224,76 @@ osobno.
 Progu podejrzliwości nie usuwamy z kodu, mimo że źródło koryguje ceny: ruch powyżej 50%
 w sesji rozliczeniowej dostaje ostrzeżenie w logu. Zwykle jest prawdziwy (biotech po wynikach
 badania), ale zanim taka obserwacja wejdzie do cech fazy 2, warto ją obejrzeć.
+
+
+## 7. Duplikaty daty publikacji
+
+Źródła bywają niezgodne nie tylko co do **pory**, ale i co do **daty**. 2026-08-13 Nasdaq
+umieścił ACTU, AIRE, FSI, SOWG i VNRX 13.08, a Finnhub 14.08 — 5 przypadków na ~405 spółek,
+czyli ~1,2%. Po scaleniu po `(ticker, event_date)` powstają z tego **dwa zdarzenia opisujące
+jedną publikację**, a w fazie 2 taki duplikat zawyża statystyki historyczne spółki: liczbę
+raportów, średnią i medianę ruchu.
+
+Spółka nie raportuje dwa razy w odstępie doby, więc para „ten sam ticker, sąsiednie dni" jest
+rozpoznawalna bez żadnej wiedzy zewnętrznej.
+
+### Czego nie robimy i dlaczego
+
+| Wariant | Dlaczego odrzucony |
+|---|---|
+| Wybrać zwycięskie źródło | Nic nie wskazuje, które ma rację. `eps_actual` nie rozstrzyga: Nasdaq nie zwraca go **nigdy**, a Finnhub dla spornych tickerów miał `None`. Trzeciego źródła nie ma — yfinance jest za proxy niesprawny |
+| Scalić w jedno zdarzenie z wybraną datą | Data jest częścią klucza i wchodzi do wyliczenia sesji. Wybór jednej z dwóch to zmyślenie precyzji, której nie mamy |
+| **Rozstrzygnąć po cenach** — wziąć tę sesję, w której ruch był większy | **Wnioskowanie z tej samej zmiennej, którą faza 2 ma przewidywać.** Wybieranie daty tak, żeby ruch był największy, systematycznie zawyża rozkład targetu. To najbardziej kuszący wariant i dlatego wart wyraźnego zapisania jako zakazany |
+
+### Co robimy
+
+Oznaczamy **oba** wiersze pary flagą `date_conflict` w `earnings_events`. Rekord zostaje
+w bazie (SPEC §1.4 zabrania usuwania rekordów o niskiej jakości), a faza 2 wyklucza takie
+zdarzenia jednym predykatem:
+
+```sql
+SELECT * FROM earnings_events WHERE date_conflict = 0;
+```
+
+Trzy szczegóły implementacji, każdy z powodem:
+
+1. **Post-pass po całej tabeli**, nie decyzja przy zapisie. Backfill przetwarza dni po kolei
+   i wznawia się po przerwaniu, więc para może powstać z dwóch różnych runów.
+2. **Flaga tylko w SQL**, nie w modelu `EarningsEvent`. Jest wyliczana, nie wnoszona przez
+   źródło; `upsert_events` jej nie dotyka, więc kolejny skan jej nie zeruje.
+3. **Próg to jeden dzień.** Odstęp trzech dni to już przełożona publikacja albo błąd źródła,
+   czyli inne zjawisko — nie wrzucamy go do tego samego worka.
+
+## 8. Ograniczenia danych historycznych (zweryfikowane 2026-08-18)
+
+Sprawdzone na siedmiu dniach rozrzuconych po dwóch latach, bo SPEC §2.1 zakłada, że historyczne
+daty wyników są dostępne, ale nikt tego nie potwierdził na tym konkretnym źródle.
+
+| Co | Wynik | Konsekwencja |
+|---|---|---|
+| Zasięg kalendarza | 2 lata wstecz działa (296 rekordów dla 2024-08-14) | backfill wykonalny |
+| Gęstość rok do roku | porównywalna (2024-11-06: 399, 2025-11-05: 417) | brak degradacji starszych danych |
+| Kapitalizacja, prognoza EPS | obecne | użyteczne jako cechy fazy 2 |
+| **`timing` (BMO/AMC)** | **pusty w 100% dla dat historycznych** | patrz niżej |
+| `eps_actual` | nigdy nieobecny, także dla dat bieżących | nie rozstrzyga ani duplikatów, ani pory |
+
+### Brak pory publikacji w historii — problem otwarty
+
+Nasdaq retroaktywnie kasuje flagę pory: dla dat historycznych `time` to zawsze
+`time-not-supplied`. Bez pory **sesja rozliczeniowa jest niejednoznaczna**, bo BMO z dnia D
+konsumuje sesja D, a AMC z dnia D sesja D+1. Target fazy 2 (`abs_move_pct`) zależy więc od
+informacji, której w historii nie mamy.
+
+Trzy wyjścia, żadne nie przesądzone — decyzja zmienia definicję targetu, więc nie jest decyzją
+implementacyjną:
+
+1. **Finnhub historycznie** — jeśli zachowuje `hour` dla dat przeszłych, problem znika.
+   Do sprawdzenia jednym zapytaniem, gdy klucz będzie dostępny. **Najtańsza droga, sprawdzić
+   pierwsze.**
+2. **Okno dwusesyjne** — ruch od `close(D-1)` do `close(D+1)` zawiera reakcję niezależnie od
+   pory. Wybrane z góry, więc bez cyrkularności, ale target jest szerszy i bardziej zaszumiony
+   niż prawdziwa reakcja jednosesyjna. Wymagałoby kolumny odróżniającej takie wiersze od
+   rozliczeń dokładnych, żeby jedno nie mieszało się z drugim niezauważenie.
+3. **Trenować tylko na danych zbieranych do przodu** — dokładne, ale odsuwa fazę 2 o miesiące.
+
+Zgadywanie pory z zachowania cen jest **wykluczone** z tego samego powodu co w §7.
