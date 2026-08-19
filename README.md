@@ -74,6 +74,75 @@ python scripts/probe_sources.py          # diagnostyka: czy źródła dziś odpo
 
 `stats` i `backfill` powstają w kroku 8 — atrap dla nich nie ma.
 
+## Gdzie szukać wyników
+
+Trzy miejsca, w tej kolejności użyteczności:
+
+| Gdzie | Co zawiera | Kiedy powstaje |
+|---|---|---|
+| `reports/scan-<sesja>.md` | tabela ze SPEC §1.1 — ticker, EM trzema metodami, flagi, po rozliczeniu ruch i `em_ratio` | po każdym `scan` i `settle`; commitowany do repo |
+| `data/emscan.db` | wszystko: `earnings_events`, `em_snapshots` (każdy pomiar), `outcomes` | po każdym `scan` i `settle` |
+| Actions → artifacts | kopia raportu, retencja 90 dni | po każdym przebiegu workflow |
+
+Raport pokazuje domyślnie tylko zdarzenia powyżej progu EM. `report --min-em 0` pokazuje
+**wszystko, co zmierzono**, a `--format csv` daje plik do arkusza.
+
+### Czego w raporcie nie brać za dobrą monetę
+
+- `zero_bid` — kwotowanie było jednostronne, cena pochodzi z ostatniej transakcji. Przy
+  mikrospółkach to norma i EM jest wtedy zgrubny
+- `stale_quote` — kwotowania nieodświeżane, czyli skan poza oknem sesji
+- `dte_gt_2` — wygaśnięcie dalej niż dwa dni, więc straddle zawiera wartość czasową
+  niezwiązaną z wynikami i **EM jest zawyżony** (METHODOLOGY §4)
+- `wide_spread`, `low_oi` — EM policzony poprawnie, ale wejście po tych cenach byłoby drogie
+  albo niewykonalne
+
+### Pytania do bazy
+
+`stats` powstaje w kroku 8; do tego czasu SQL. Wszystkie poniższe sprawdzone na schemacie:
+
+```sql
+-- co rynek wyceniał najwyżej w danej sesji
+SELECT e.ticker, e.timing, ROUND(s.em_pct*100,2) AS em_pct, s.quality_flags
+FROM em_snapshots s JOIN earnings_events e ON e.id = s.event_id
+WHERE e.session_date = '2026-08-19'
+ORDER BY s.em_pct DESC LIMIT 20;
+
+-- czy rynek przeszacowuje ruch: kluczowe pytanie tego projektu
+SELECT COUNT(*) AS zdarzen, SUM(exceeded_em) AS przebilo_em,
+       ROUND(100.0*SUM(exceeded_em)/COUNT(*),1) AS proc_przebic,
+       ROUND(AVG(em_ratio),2) AS sredni_em_ratio, ROUND(AVG(vrp)*100,2) AS sredni_vrp_pp
+FROM outcomes;
+
+-- która z trzech metod EM trafia bliżej realizacji (MAE w punktach procentowych)
+SELECT ROUND(AVG(ABS(s.em_pct - o.abs_move_pct))*100,2)          AS mae_A,
+       ROUND(AVG(ABS(s.em_pct_weighted - o.abs_move_pct))*100,2) AS mae_B,
+       ROUND(AVG(ABS(s.em_pct_iv - o.abs_move_pct))*100,2)       AS mae_C
+FROM em_snapshots s JOIN outcomes o ON o.event_id = s.event_id;
+
+-- historia jednej spółki
+SELECT e.event_date, ROUND(s.em_pct*100,2) AS em_pct, ROUND(o.close_pct*100,2) AS ruch_pct,
+       o.direction, ROUND(o.em_ratio,2) AS em_ratio
+FROM earnings_events e JOIN em_snapshots s ON s.event_id = e.id
+LEFT JOIN outcomes o ON o.event_id = e.id
+WHERE e.ticker = 'NVDA' ORDER BY e.event_date DESC;
+```
+
+Bez `sqlite3` w systemie: `python -c "import sqlite3; ..."` albo dowolna przeglądarka SQLite.
+
+## Rekomendacji tu nie ma i nie będzie
+
+To jest zamierzone, nie brak funkcji — SPEC §Czego NIE robić zakazuje generowania rekomendacji
+i sygnałów wejścia/wyjścia. Narzędzie zapisuje **liczby**: ile ruchu wyceniły opcje, ile ruchu
+faktycznie było i jaka jest różnica. Interpretacja jest po stronie czytającego.
+
+Najbliżej „sygnału" znajdzie się faza 2: `edge_pct = predicted_move_pct - em_pct`, czyli różnica
+między modelem a wyceną rynku. To nadal liczba z przedziałem ufności, a nie zalecenie — i wchodzi
+do raportu tylko wtedy, gdy model pobije naiwną medianę historyczną (SPEC §2.4). Sygnał
+**kierunkowy** ma jeszcze wyższy próg: minimum 200 niezależnych zdarzeń, Brier score lepszy od
+„zawsze UP", block bootstrap po dniach i dodatni P&L po realistycznych kosztach (SPEC §3.3).
+Jeśli nie przejdzie, zostaje wyłączony, a negatywny wynik trafia do `EVALUATION.md`.
+
 ## Automatyzacja
 
 Dwa workflow'y w `.github/workflows/`: `scan.yml` o 15:30 ET w dni sesyjne i `settle.yml`
