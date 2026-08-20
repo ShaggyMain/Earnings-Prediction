@@ -372,6 +372,7 @@ def compute_expected_move(
         put_mid=put_leg.price,
         underlying_bid=chain.underlying_bid,
         underlying_ask=chain.underlying_ask,
+        iv30=chain.underlying_iv30,
         straddle=straddle,
         em_abs=em_abs,
         em_pct=em_pct,

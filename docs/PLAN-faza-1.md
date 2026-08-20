@@ -330,6 +330,55 @@ jest w tym projekcie niewykrywalny w rozsądnym czasie i EVALUATION.md mówi to 
 Migracja schematu przeszła z pojedynczego przypadku na tabelę `MIGRATIONS` — baza z 19.08 jest
 już w repo, więc każda kolejna kolumna musi się dokładać do istniejącego pliku.
 
+## Decyzje sesji 9 (2026-08-19): warstwa danych pod reżim rynkowy
+
+Cechy „szerokiego rynku" ze SPEC §2.3 wymagają danych, których nie zbieraliśmy. Trzy zmiany
+plus jedna naprawa cichego błędu, który wyszedł po drodze.
+
+| Zmiana | Ustalenie z pomiaru |
+|---|---|
+| `assetclass` w źródle cen | SPY, QQQ, IWM, VXX działają **tylko** z `assetclass=etf`; przy `stocks` endpoint zwraca zero wierszy, nie błąd. Indeks VIX nie działa w żadnej klasie |
+| `iv30` w snapshocie i w świecach | CBOE podaje ją w **procentach**, a `iv` kontraktu w ułamku — normalizujemy. Dla SPY wyszło 12,06%, i to jest lepszy zamiennik VIX niż VXX |
+| Tabela `daily_bars` | `scan` i `settle` pobierają 45 sesji na ticker i dotąd je wyrzucały. Klucz `(ticker, day)` sprawia, że nakładające się okna nie mnożą wierszy |
+| Komenda `market` | Cztery zapytania o ceny plus jedno o zmienność, dwa lata historii; wpisana w `settle.yml`, bo po zamknięciu sesji świeca dnia jest kompletna |
+
+### Cichy błąd znaleziony po drodze
+
+Endpoint historyczny Nasdaqa zwraca **zero wierszy** dla okna, którego `todate` leży w odległej
+przeszłości: 2025-06-01..2025-06-30 daje pustkę, a 2024-08-01..dziś daje 512 sesji. Okno
+kończące się dziewięć dni temu jeszcze działa. To znaczy, że `settle` na starszej dacie albo
+backfill cen dostawałyby pustkę **nieodróżnialną od braku notowań**.
+
+Naprawa: `daily_bars` wysyła zawsze okno kończące się dziś i przycina wynik u siebie.
+Zweryfikowane — AMAT za czerwiec 2025 zwraca teraz 20 świec zamiast zera.
+
+### Refaktor przy okazji
+
+`iv30` weszła do interfejsu `OptionsChainSource` jako opcjonalny hak (jak `data_timestamp`
+i `underlying_volume`), zamiast sprawdzania `isinstance(options, CboeOptionsSource)` w silniku.
+Sprawdzanie klasy dostawcy w logice biznesowej łamało SPEC §1.2 i uniemożliwiało test na atrapie.
+
+Stan bazy po tej sesji: 401 kB, w tym 2003 świece czterech instrumentów rynkowych za dwa lata.
+
+### Okno skanu przesunięte, bo cron się spóźnia
+
+Pierwszy przebieg `Scan` z harmonogramu (2026-08-19) zachował się poprawnie — krok skanu zajął
+0 sekund, baza bez zmian, raport i commit pominięte, bo 20:30 UTC to w czasie letnim 16:30 ET.
+Ale **odpalił się o 20:53, czyli 23 minuty po terminie.**
+
+Przy cronie na 15:30 ET i oknie kończącym się o 16:00 zapasu było 30 minut. Takie opóźnienie
+skasowałoby cały dzień danych, a okna nie da się odtworzyć. Dlatego:
+
+| | Przed | Po |
+|---|---|---|
+| Cron | 19:30 / 20:30 UTC (15:30 ET) | **19:00 / 20:00 UTC (15:00 ET)** |
+| Okno | 15:00–16:00 ET | **14:30–15:45 ET** |
+| Zapas na opóźnienie | 30 min | **45 min** |
+
+Granic okna nie wolno ruszać osobno: rozszerzenie do 16:00 sprawiłoby, że w czasie zimowym
+**oba** wpisy crona wpadają w okno i skan rusza dwa razy. Macierz sprawdzona na kodzie —
+dokładnie jeden wpis z pary trafia w okno w każdej porze roku.
+
 ## Nauczka z CI (2026-08-18) — sprawdzaj Actions po pushu
 
 Przebiegi CI numer 6, 7 i 8 były **czerwone**, a ja tego nie zauważyłem przez trzy kroki,

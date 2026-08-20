@@ -145,6 +145,7 @@ i zostaje tu zapisany jako taki (SPEC §2.4).
 | Pora publikacji znana tylko w danych świeżych | 2024–2025: **0%**; dane świeże: 55,7% |
 | `stale_quote` przy mniej płynnych nazwach | 19.08: 6 z 16 snapshotów |
 | Metody EM się rozjeżdżają | 19.08: metoda C powyżej A w 16 z 16 wierszy |
+| Brak indeksu VIX u dostawcy | reżim zmienności mierzony przez `iv30` SPY, nie przez VIX |
 
 Pierwsze z nich jest najgroźniejsze dla fazy 2: zbiór EM **nie jest** losową próbką rynku, więc
 model uczy się rozkładu warunkowego na „spółka przeszła filtry", a nie rozkładu bezwarunkowego.

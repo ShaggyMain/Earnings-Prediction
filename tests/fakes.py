@@ -131,12 +131,14 @@ class FakeOptions(OptionsChainSource):
         not_covered: frozenset[str] = frozenset(),
         failing: frozenset[str] = frozenset(),
         timestamps: dict[str, datetime] | None = None,
+        iv30: dict[str, float] | None = None,
     ) -> None:
         self._chains = chains
         self._volumes = volumes or {}
         self._not_covered = not_covered
         self._failing = failing
         self._timestamps = timestamps or {}
+        self._iv30 = iv30 or {}
         self.tickers_fetched: list[str] = []
 
     def _check(self, ticker: str) -> dict[date, OptionChain]:
@@ -158,6 +160,11 @@ class FakeOptions(OptionsChainSource):
 
     def data_timestamp(self, ticker: str) -> datetime | None:
         return self._timestamps.get(ticker)
+
+    def iv30(self, ticker: str) -> float | None:
+        if ticker in self._failing:
+            raise SourceUnavailable(f"{self.name}: udawana awaria dla {ticker}")
+        return self._iv30.get(ticker)
 
 
 class FakePrices(PriceSource):

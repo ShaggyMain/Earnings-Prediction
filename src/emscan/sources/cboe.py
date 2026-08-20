@@ -67,7 +67,18 @@ _OCC_STRIKE_DIVISOR = 1000.0
 class CboeQuote:
     """Kwotowanie instrumentu bazowego, wyciągnięte z tej samej odpowiedzi co łańcuch."""
 
-    __slots__ = ("ask", "bid", "close", "high", "low", "open", "prev_close", "spot", "volume")
+    __slots__ = (
+        "ask",
+        "bid",
+        "close",
+        "high",
+        "iv30",
+        "low",
+        "open",
+        "prev_close",
+        "spot",
+        "volume",
+    )
 
     def __init__(self, payload: dict[str, Any]) -> None:
         self.spot = _as_float(payload.get("current_price"))
@@ -79,6 +90,7 @@ class CboeQuote:
         self.close = _as_float(payload.get("close"))
         self.prev_close = _as_float(payload.get("prev_day_close"))
         self.volume = _as_int(payload.get("volume"))
+        self.iv30 = _iv30_as_fraction(payload.get("iv30"))
 
 
 def parse_occ_symbol(symbol: str) -> tuple[str, date, OptionType, float]:
@@ -165,6 +177,10 @@ class CboeOptionsSource(OptionsChainSource):
         """Kwotowanie instrumentu bazowego — bez dodatkowego zapytania."""
         data = self._payload(ticker).get("data") or {}
         return CboeQuote(data)
+
+    def iv30(self, ticker: str) -> float | None:
+        """IV30 z tej samej odpowiedzi co łańcuch, znormalizowana do ułamka."""
+        return self.quote(ticker).iv30
 
     def underlying_volume(self, ticker: str) -> int | None:
         """Wolumen akcji w bieżącej sesji — bez dodatkowego zapytania."""
@@ -257,6 +273,7 @@ class CboeOptionsSource(OptionsChainSource):
             fetched_at=datetime.now(tz=ET),
             underlying_bid=quote.bid,
             underlying_ask=quote.ask,
+            underlying_iv30=quote.iv30,
         )
 
     def is_covered(self, ticker: str) -> bool:
@@ -266,6 +283,21 @@ class CboeOptionsSource(OptionsChainSource):
         except SymbolNotCovered:
             return False
         return True
+
+
+def _iv30_as_fraction(value: Any) -> float | None:
+    """30-dniowa zmienność implikowana instrumentu bazowego, sprowadzona do **ułamka**.
+
+    CBOE podaje `iv30` w **procentach** (AMAT: 53.017), a `iv` pojedynczego kontraktu
+    w ułamku (0.6753). Zapisanie jednego obok drugiego bez normalizacji dałoby dwie kolumny
+    w różnych jednostkach, co jest najlepszym sposobem na zafałszowanie cechy w fazie 2.
+
+    Zero traktujemy jak brak danych, tak samo jak przy `iv` kontraktu.
+    """
+    number = _as_float(value)
+    if number is None or number <= 0:
+        return None
+    return number / 100.0
 
 
 def _as_float(value: Any) -> float | None:

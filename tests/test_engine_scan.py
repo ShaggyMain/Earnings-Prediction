@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from emscan.db import latest_snapshots_for_session, open_memory_db
+from emscan.db import bars_for, latest_snapshots_for_session, open_memory_db
 from emscan.engine.scan import ScanResult, run_scan, target_session
 from emscan.engine.universe import RejectReason, UniverseFilters
 from emscan.models import Timing
@@ -266,3 +266,17 @@ def test_calendar_is_asked_about_both_days() -> None:
             snapshot_at=SNAPSHOT_AT,
         )
     assert calendar.days_fetched == [SCAN_DAY, SESSION]
+
+
+def test_scan_caches_the_price_history_it_fetched(world: Any) -> None:
+    """Świece i tak przeszły przez nasze ręce — bez zapisu faza 2 pytałaby o nie tysiące razy."""
+    _, conn, _, prices = world
+    assert sorted(prices.tickers_fetched) == ["BMOX", "ILLIQ", "LIQD", "NOBARS"]
+    cached = bars_for(conn, "LIQD", SCAN_DAY - timedelta(days=45), SCAN_DAY)
+    assert len(cached) == len(HISTORY)
+    assert cached[-1].volume == 900_000
+
+
+def test_scan_does_not_cache_bars_for_tickers_it_never_asked_about(world: Any) -> None:
+    _, conn, _, _ = world
+    assert bars_for(conn, "CALM", SCAN_DAY - timedelta(days=45), SCAN_DAY) == []

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from emscan.db import (
+    bars_for,
     event_id_for,
     insert_snapshot,
     open_memory_db,
@@ -517,3 +518,18 @@ def test_narrow_scope_asks_prices_only_about_measured_events(conn: sqlite3.Conne
     result = run_settle(scan_date=SCAN_DAY, conn=conn, prices=prices, settled_at=SETTLED_AT)
     assert prices.tickers_fetched == []
     assert result.rows == ()
+
+
+def test_settle_caches_the_bars_it_fetched(conn: sqlite3.Connection) -> None:
+    """Rozliczenie pobiera ~45 sesji na ticker — zapisanie ich jest darmowe i buduje historię."""
+    seed(conn, [event("AMCX", event_date=SCAN_DAY, timing=Timing.AMC, session_date=SESSION)])
+    history = [bar(SCAN_DAY, open_=99.0, close=100.0), bar(SESSION, open_=104.0, close=106.0)]
+    run_settle(
+        scan_date=SCAN_DAY,
+        conn=conn,
+        prices=FakePrices({"AMCX": history}),
+        settled_at=SETTLED_AT,
+    )
+    cached = bars_for(conn, "AMCX", SCAN_DAY, SESSION)
+    assert [b.day for b in cached] == [SCAN_DAY, SESSION]
+    assert cached[-1].close == pytest.approx(106.0)

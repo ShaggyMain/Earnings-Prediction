@@ -48,6 +48,11 @@ jobs:
           uv run python -m emscan --json-logs settle --all-events \
             ${{ inputs.date && format('--date {0}', inputs.date) || '' }}
 
+      - name: Dane rynkowe
+        # Po zamknięciu sesji świeca dnia jest kompletna, więc to właściwy moment na
+        # odświeżenie SPY/QQQ/IWM/VXX i pomiar iv30. Pięć zapytań.
+        run: uv run python -m emscan --json-logs market
+
       - name: Czy baza się zmieniła?
         id: changed
         run: |

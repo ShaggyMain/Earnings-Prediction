@@ -19,6 +19,8 @@ Uwagi z obserwacji:
    (`$507.18`, `13,132,340`), więc korzystamy z `parse_money` z modułu kalendarza.
 3. Wiersze przychodzą **od najnowszego**, a interfejs `PriceSource` wymaga rosnąco —
    odwracamy kolejność.
+4. **`todate` w odległej przeszłości daje pustą odpowiedź**, nie błąd. Dlatego pytamy zawsze
+   o okno kończące się dziś i przycinamy wynik u siebie — patrz `daily_bars`.
 
 **Polityka korekt o splity jest na razie NIEZWERYFIKOWANA.** Nie wiadomo, czy Nasdaq
 zwraca ceny surowe, czy skorygowane. Split między `baseline_close` a sesją rozliczeniową
@@ -29,9 +31,10 @@ Do tego czasu nie zakładamy żadnego wariantu.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from emscan.log import get_logger
 from emscan.sources.base import DailyBar, PriceSource, SourceDataError
@@ -40,11 +43,29 @@ from emscan.sources.nasdaq import parse_money
 
 log = get_logger(__name__)
 
+ET = ZoneInfo("America/New_York")
 API_URL = "https://api.nasdaq.com/api/quote/{ticker}/historical"
 
 
+ASSET_CLASS_STOCKS = "stocks"
+ASSET_CLASS_ETF = "etf"
+"""Klasy aktywów wymagane przez endpoint.
+
+Zweryfikowane 2026-08-19: przy `assetclass=stocks` zapytanie o SPY, QQQ i VXX zwraca **zero
+wierszy** — nie błąd, po prostu pustą tabelę. Z `assetclass=etf` te same tickery dają pełną
+historię (SPY 34 sesje w miesiącu, close 767,45 na 18.08). Indeks VIX nie jest dostępny
+w żadnej klasie: `assetclass=index` też zwraca zero. Zamiennikiem reżimu zmienności jest
+`iv30` z odpowiedzi CBOE — patrz `engine/market.py`.
+"""
+
+
 class NasdaqPriceSource(PriceSource):
-    """Świece dzienne z endpointu historycznego Nasdaq."""
+    """Świece dzienne z endpointu historycznego Nasdaq.
+
+    Jedna instancja obsługuje jedną klasę aktywów, bo `assetclass` jest pojęciem tego
+    dostawcy i nie ma go w interfejsie `PriceSource`. Dane rynkowe (SPY, QQQ) pobiera osobna
+    instancja z `asset_class=ASSET_CLASS_ETF`.
+    """
 
     name = "nasdaq"
 
@@ -55,8 +76,10 @@ class NasdaqPriceSource(PriceSource):
         timeout: float = 30.0,
         max_retries: int = 3,
         min_interval: float = 0.2,
+        asset_class: str = ASSET_CLASS_STOCKS,
         raw_dir: Path | None = None,
     ) -> None:
+        self.asset_class = asset_class
         self._fetcher = HttpFetcher(
             self.name,
             timeout=timeout,
@@ -71,22 +94,37 @@ class NasdaqPriceSource(PriceSource):
         self._fetcher.close()
 
     def daily_bars(self, ticker: str, start: date, end: date) -> list[DailyBar]:
+        """Świece w zakresie włącznie.
+
+        **Okno wysyłane do API zawsze kończy się dziś**, a przycięcie do `end` robimy u siebie.
+        Powód jest empiryczny (2026-08-19): endpoint zwraca **zero wierszy**, gdy `todate` leży
+        w odległej przeszłości — 2025-06-01..2025-06-30 daje pustkę, a 2024-08-01..dziś daje
+        512 sesji. Okno kończące się 9 dni temu jeszcze działa, 14 miesięcy temu już nie, więc
+        granica jest gdzieś pomiędzy i nie jest udokumentowana.
+
+        Bez tej korekty rozliczenie starszej sesji albo backfill cen dostawałyby pustą
+        odpowiedź nieodróżnialną od „spółka nie była notowana" — czyli dokładnie ten rodzaj
+        cichego zera, którego SPEC zakazuje.
+        """
         symbol = ticker.strip().upper()
+        request_end = max(end, datetime.now(tz=ET).date())
         payload = self._fetcher.get_json(
             API_URL.format(ticker=symbol),
             params={
-                "assetclass": "stocks",
+                "assetclass": self.asset_class,
                 "fromdate": start.isoformat(),
-                "todate": end.isoformat(),
+                "todate": request_end.isoformat(),
                 "limit": 9999,
             },
-            raw_name=f"nasdaq_historical_{symbol}_{start.isoformat()}_{end.isoformat()}.json",
+            raw_name=f"nasdaq_historical_{self.asset_class}_{symbol}"
+            f"_{start.isoformat()}_{request_end.isoformat()}.json",
         )
-        bars = self.parse(payload, symbol)
+        bars = [bar for bar in self.parse(payload, symbol) if start <= bar.day <= end]
         log.info(
             "fetch",
             source=self.name,
             ticker=symbol,
+            asset_class=self.asset_class,
             bars=len(bars),
             start=start.isoformat(),
             end=end.isoformat(),

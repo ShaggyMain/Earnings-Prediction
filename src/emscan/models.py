@@ -159,6 +159,9 @@ class EmSnapshot(BaseModel):
 
     underlying_bid: float | None = None
     underlying_ask: float | None = None
+    iv30: float | None = None
+    """30-dniowa IV instrumentu bazowego (ułamek). Reżim zmienności spółki niezależny od
+    wybranego wygaśnięcia — `iv_atm` przy wynikach jest podbite samym zdarzeniem."""
     """Kwotowanie akcji w momencie snapshotu — koszt wejścia dla hipotez na instrumencie
     bazowym (D3 z SPEC §3.1). Spread opcyjny jest o dwa rzędy wielkości większy i nie
     zastępuje tej informacji."""

@@ -248,3 +248,26 @@ def test_underlying_spread_is_none_without_a_two_sided_quote(
     respx.get(AMAT_URL).mock(return_value=httpx.Response(200, json=payload))
     chain = source.chain("AMAT", AMAT_NEAR_EXPIRY)
     assert chain.underlying_rel_spread is None
+
+
+@respx.mock
+def test_iv30_is_normalised_to_a_fraction(source: CboeOptionsSource, cboe_amat: Any) -> None:
+    """CBOE podaje iv30 w procentach (53.017), a `iv` kontraktu w ułamku (0.6753).
+
+    Zapisanie jednego obok drugiego bez normalizacji dałoby dwie kolumny w różnych
+    jednostkach — najprostszy sposób na zafałszowanie cechy w fazie 2.
+    """
+    respx.get(AMAT_URL).mock(return_value=httpx.Response(200, json=cboe_amat))
+    chain = source.chain("AMAT", AMAT_NEAR_EXPIRY)
+    assert chain.underlying_iv30 == pytest.approx(0.53017)
+    assert source.quote("AMAT").iv30 == pytest.approx(0.53017)
+
+
+@respx.mock
+def test_zero_iv30_is_missing_data(source: CboeOptionsSource, cboe_amat: Any) -> None:
+    respx.get(AMAT_URL).mock(
+        return_value=httpx.Response(
+            200, json={**cboe_amat, "data": {**cboe_amat["data"], "iv30": 0}}
+        )
+    )
+    assert source.chain("AMAT", AMAT_NEAR_EXPIRY).underlying_iv30 is None

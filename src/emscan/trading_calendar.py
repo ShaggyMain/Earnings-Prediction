@@ -21,13 +21,28 @@ ET = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
 
-SCAN_WINDOW_START = time(15, 0)
-SCAN_WINDOW_END = time(16, 0)
-"""Okno, w którym skan ma sens: ostatnia godzina sesji (SPEC §1.8 celuje w 15:30 ET).
+SCAN_WINDOW_START = time(14, 30)
+SCAN_WINDOW_END = time(15, 45)
+"""Okno, w którym skan ma sens. SPEC §1.8 celuje w 15:30 ET, cron trafia w 15:00 ET.
 
-Godzina zapasu, a nie kwadrans, bo cron w GitHub Actions bywa opóźniony o kilkanaście minut.
-Opóźnienie przekraczające okno oznacza pominięcie skanu — kwotowania po zamknięciu byłyby
-nieodświeżone, a fałszywy snapshot jest gorszy od braku snapshotu.
+Granice są dobrane pod **dwa** wymagania naraz i zmiana jednej bez drugiej je psuje:
+
+1. **Zapas na opóźnienie crona.** Harmonogramy GitHub Actions spóźniają się — zaobserwowane
+   23 minuty w przebiegu z 2026-08-19 20:53 UTC przy cronie na 20:30. Cron celujący w 15:00 ET
+   ma do końca okna 45 minut zapasu. Opóźnienie większe oznacza pominięcie dnia; ratunkiem
+   jest `workflow_dispatch`, bo okna nie da się odtworzyć.
+2. **Rozróżnienie pary cronów na DST.** Cron w UTC nie przesuwa się z czasem letnim, więc
+   workflow ma dwa wpisy godzinę po sobie i **dokładnie jeden** z nich musi wpadać w okno:
+
+   | Wpis UTC | Czas letni (EDT) | Czas zimowy (EST) |
+   |---|---|---|
+   | 19:00 | 15:00 — w oknie | 14:00 — poza |
+   | 20:00 | 16:00 — poza | 15:00 — w oknie |
+
+   Rozszerzenie okna do 16:00 zepsułoby to: w czasie zimowym oba wpisy byłyby w oknie i skan
+   ruszyłby dwa razy.
+
+Kwotowania po zamknięciu są nieodświeżone, a fałszywy snapshot jest gorszy od braku snapshotu.
 """
 """Zwykłe godziny sesji NYSE w czasie nowojorskim.
 

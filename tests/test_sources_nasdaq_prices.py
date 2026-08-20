@@ -6,10 +6,12 @@ from collections.abc import Iterator
 from datetime import date
 from typing import Any
 
+import httpx
 import pytest
+import respx
 
 from emscan.sources.base import SourceDataError
-from emscan.sources.nasdaq_prices import NasdaqPriceSource
+from emscan.sources.nasdaq_prices import ASSET_CLASS_ETF, NasdaqPriceSource
 
 
 @pytest.fixture
@@ -131,3 +133,54 @@ def test_zero_volume_session_is_kept(source: NasdaqPriceSource) -> None:
     }
     (bar,) = source.parse(payload, "AMAT")
     assert bar.volume == 0
+
+
+# ------------------------------------------------------------------ okno zapytania i klasa aktywów
+
+HISTORICAL_URL = "https://api.nasdaq.com/api/quote/AMAT/historical"
+ETF_URL = "https://api.nasdaq.com/api/quote/SPY/historical"
+
+
+@respx.mock
+def test_request_window_always_ends_today(source: NasdaqPriceSource, nasdaq_history: Any) -> None:
+    """Endpoint zwraca pustkę dla `todate` w odległej przeszłości — sprawdzone 2026-08-19.
+
+    Dlatego pytamy o okno kończące się dziś, a przycinamy u siebie. Inaczej rozliczenie
+    starszej sesji dostawałoby zero świec nieodróżnialne od braku notowań.
+    """
+    route = respx.get(HISTORICAL_URL).mock(return_value=httpx.Response(200, json=nasdaq_history))
+    source.daily_bars("AMAT", date(2025, 6, 1), date(2025, 6, 30))
+
+    sent = dict(route.calls[0].request.url.params)
+    assert sent["fromdate"] == "2025-06-01"
+    assert sent["todate"] > "2026-01-01"  # dzisiejsza data, nie 2025-06-30
+
+
+@respx.mock
+def test_result_is_trimmed_to_the_requested_end(
+    source: NasdaqPriceSource, nasdaq_history: Any
+) -> None:
+    """Szersze okno w zapytaniu nie może przeciekać do wyniku."""
+    respx.get(HISTORICAL_URL).mock(return_value=httpx.Response(200, json=nasdaq_history))
+    bars = source.daily_bars("AMAT", date(2026, 7, 1), date(2026, 7, 15))
+    assert [b.day for b in bars] == sorted(b.day for b in bars)
+    assert max(b.day for b in bars) <= date(2026, 7, 15)
+    assert min(b.day for b in bars) >= date(2026, 7, 1)
+
+
+@respx.mock
+def test_asset_class_reaches_the_request(nasdaq_history: Any) -> None:
+    """SPY przy `assetclass=stocks` zwraca zero wierszy, nie błąd — stąd osobna instancja."""
+    route = respx.get(ETF_URL).mock(return_value=httpx.Response(200, json=nasdaq_history))
+    client = NasdaqPriceSource(
+        user_agent="pytest", min_interval=0, max_retries=1, asset_class=ASSET_CLASS_ETF
+    )
+    try:
+        client.daily_bars("SPY", date(2026, 7, 1), date(2026, 8, 19))
+    finally:
+        client.close()
+    assert dict(route.calls[0].request.url.params)["assetclass"] == "etf"
+
+
+def test_default_asset_class_is_stocks(source: NasdaqPriceSource) -> None:
+    assert source.asset_class == "stocks"
